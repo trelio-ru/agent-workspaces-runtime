@@ -610,6 +610,9 @@ publication tooling также остаются вне этого публичн
   snapshot тем же builder/fences без ожидания, stale fallback или shared writes.
   Fresh recipient/generation fence предшествует
   одноразовой выдаче; тяжёлый corpus не переносится в MCP-процесс.
+  Пакетное чтение файлов только для объявленной v2 projection парного human bridge.
+  Opaque IDs, exact accepted head, полный batch digest/AAD/size до кэша; ACL и
+  protocol/crypto ошибки не переходят на одиночные чтения.
   Human/provider lifetimes и зарегистрированный finish сохраняют отдельные
   границы: [контракт](docs/agent-workspace-runtime.md#call-time-budget).
   Best-effort retention после lifecycle ограничен пятью секундами и не блокирует

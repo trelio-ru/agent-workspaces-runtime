@@ -270,7 +270,7 @@ const openEncryptedFile = async ({ origin, token, companyEncryption, workspaceId
 };
 
 /** Names and paths leave this function only on the trusted device. HTTP uses opaque UUIDs. */
-export const readEncryptedWorkspaceFileManifest = async (input) => {
+export const readEncryptedWorkspaceFileManifest = async (input, { onSearchBatchProjection } = {}) => {
   const overview = await readJsonResponse(await request(input.origin, input.token,
     `/api/agent-workspaces/workspaces/${input.workspaceId}`, { signal: input.signal }));
   const projection = overview?.encryption?.browserProjection;
@@ -311,6 +311,7 @@ export const readEncryptedWorkspaceFileManifest = async (input) => {
         || typeof file.contentType !== "string" || file.contentType.length > 2048) fail("WORKSPACE_FILE_MANIFEST_INVALID");
       ids.add(file.id); paths.add(file.path);
     }
+    if (projection.searchFileBatchVersion === 1) onSearchBatchProjection?.(projection.id);
     return manifest.files;
   } finally { bytes.fill(0); }
 };
@@ -320,6 +321,81 @@ export const readEncryptedWorkspaceSelectedFile = async (input, file) => {
   const bytes = await openEncryptedFile({ ...input, fileId: file.id, kind: "file", maximum: Math.min(file.sizeBytes, LOCAL_ATTACHMENT_MAX_BYTES) });
   if (bytes.length !== file.sizeBytes) { bytes.fill(0); fail("WORKSPACE_FILE_SIZE_MISMATCH"); }
   return bytes;
+};
+
+export const ENCRYPTED_SEARCH_BATCH_MAX_FILES = 16;
+export const ENCRYPTED_SEARCH_BATCH_MAX_FILE_BYTES = 128 * 1024;
+const MAX_BATCH_CIPHERTEXT_PER_FILE = 256 * 1024;
+
+/** One bounded response transports independently authenticated TRELIOE1 objects.
+ * Verify every frame against the local manifest before exposing a single chunk. */
+export const readEncryptedWorkspaceSearchFileBatch = async (input, projectionId, files) => {
+  if (files.length < 2 || files.length > ENCRYPTED_SEARCH_BATCH_MAX_FILES
+    || files.some(file => file.sizeBytes > ENCRYPTED_SEARCH_BATCH_MAX_FILE_BYTES)) fail("WORKSPACE_FILE_BATCH_INVALID");
+  const query = new URLSearchParams({ head: input.workspaceHead, projectionId, files: files.map(file => file.id).join(",") });
+  const response = await request(input.origin, input.token,
+    `/api/agent-workspaces/workspaces/${input.workspaceId}/encrypted-search-files?${query}`,
+    { signal: input.signal, maximumErrorResponseBytes: 16 * 1024 });
+  if (response.headers.get("x-trelio-workspace-id") !== input.workspaceId
+    || response.headers.get("x-trelio-workspace-head") !== input.workspaceHead) {
+    await response.body?.cancel();
+    fail("WORKSPACE_OUTDATED");
+  }
+  const maximumHeader = 4096;
+  const bytes = await readBoundedBytes(response, 4 + maximumHeader + files.length * MAX_BATCH_CIPHERTEXT_PER_FILE, input.signal);
+  try {
+    if (bytes.length < 4) fail("WORKSPACE_FILE_BATCH_INVALID");
+    const headerLength = bytes.readUInt32BE();
+    if (headerLength < 2 || headerLength > maximumHeader || headerLength + 4 > bytes.length) fail("WORKSPACE_FILE_BATCH_INVALID");
+    let entries;
+    try { entries = JSON.parse(bytes.subarray(4, 4 + headerLength).toString("utf8")); }
+    catch { fail("WORKSPACE_FILE_BATCH_INVALID"); }
+    if (!Array.isArray(entries) || entries.length !== files.length) fail("WORKSPACE_FILE_BATCH_INVALID");
+    let offset = 4 + headerLength;
+    const ciphertexts = files.map((file, index) => {
+      const entry = entries[index];
+      if (entry?.id !== file.id || !Number.isSafeInteger(entry.size) || entry.size <= 0
+        || entry.size > MAX_BATCH_CIPHERTEXT_PER_FILE || offset + entry.size > bytes.length
+        || !/^[a-f0-9]{64}$/u.test(String(entry.digest))) fail("WORKSPACE_FILE_BATCH_INVALID");
+      const ciphertext = bytes.subarray(offset, offset + entry.size);
+      offset += entry.size;
+      return { ciphertext, digest: entry.digest };
+    });
+    if (offset !== bytes.length) fail("WORKSPACE_FILE_BATCH_INVALID");
+    const indexed = [];
+    for (const [index, file] of files.entries()) {
+      input.signal?.throwIfAborted();
+      const { ciphertext, digest } = ciphertexts[index];
+      const opened = await decryptFileFromCompanyContainerBytes({
+        bytes: ciphertext, expectedCiphertextSha256: digest, maximumPlaintextBytes: file.sizeBytes,
+        scopePrivateKey: input.companyEncryption.scopePrivateEncryptionKey.privateKey,
+        scopePrivateJwk: input.companyEncryption.scopePrivateEncryptionKey.privateJwk,
+        validateHeader: header => assertWorkspaceSearchFileHeader(input, file, header),
+      });
+      try {
+        input.signal?.throwIfAborted();
+        const chunks = [];
+        let invalidText = false;
+        try { for await (const chunk of chunkWorkspaceText([opened.bytes])) chunks.push(chunk); }
+        catch (error) {
+          if (error?.code !== "ERR_ENCODING_INVALID_ENCODED_DATA" && error?.message !== "WORKSPACE_TEXT_INVALID") throw error;
+          invalidText = true;
+          chunks.length = 0;
+        }
+        indexed.push({ chunks, searchCoverage: { status: invalidText ? "unsupported" : "complete",
+          indexedBytes: invalidText ? 0 : file.sizeBytes, totalBytes: file.sizeBytes } });
+      } finally { opened.bytes.fill(0); }
+    }
+    return indexed;
+  } finally { bytes.fill(0); }
+};
+
+const assertWorkspaceSearchFileHeader = (input, file, header) => {
+  const aad = header.aad;
+  if (header.plaintextSizeBytes !== file.sizeBytes || aad?.companyId !== input.companyEncryption.runtime.company.id
+    || aad?.scopeId !== input.companyEncryption.runtime.scope.id || aad?.scopeEpoch !== input.companyEncryption.runtime.scope.epoch
+    || aad?.entityType !== "agent_workspace_browser_file" || aad?.entityId !== file.id
+    || aad?.entityRevision !== 1 || aad?.purpose !== "file") fail("WORKSPACE_FILE_ENCRYPTION_BINDING_INVALID");
 };
 
 /** Stream authenticated bytes into bounded index pieces without writing plaintext. */
@@ -374,13 +450,7 @@ export const readEncryptedWorkspaceSearchChunks = async (input, file) => {
         scopePrivateKey: input.companyEncryption.scopePrivateEncryptionKey.privateKey,
         scopePrivateJwk: input.companyEncryption.scopePrivateEncryptionKey.privateJwk,
         expectedCiphertextSha256: response.headers.get("x-trelio-ciphertext-sha256"),
-        validateHeader: (header) => {
-          const aad = header.aad;
-          if (header.plaintextSizeBytes !== file.sizeBytes || aad?.companyId !== input.companyEncryption.runtime.company.id
-            || aad?.scopeId !== input.companyEncryption.runtime.scope.id || aad?.scopeEpoch !== input.companyEncryption.runtime.scope.epoch
-            || aad?.entityType !== "agent_workspace_browser_file" || aad?.entityId !== file.id
-            || aad?.entityRevision !== 1 || aad?.purpose !== "file") fail("WORKSPACE_FILE_ENCRYPTION_BINDING_INVALID");
-        },
+        validateHeader: (header) => assertWorkspaceSearchFileHeader(input, file, header),
         consumePlaintext: async (bytes) => {
           input.signal?.throwIfAborted();
           if (!invalidText && !stream.write(Buffer.from(bytes))) await once(stream, "drain");

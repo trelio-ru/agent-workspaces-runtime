@@ -15709,7 +15709,8 @@ export const readAcceptedWorkspaceBlob = async ({ workspaceDirectory, blobId, si
 
 /** Index the complete accepted head; only verified projection absence uses Git. */
 export const readEncryptedWorkspaceSearchDocuments = async (input) => {
-  const { readEncryptedWorkspaceFileManifest, readEncryptedWorkspaceSearchChunks } =
+  const { readEncryptedWorkspaceFileManifest, readEncryptedWorkspaceSearchChunks, readEncryptedWorkspaceSearchFileBatch,
+    ENCRYPTED_SEARCH_BATCH_MAX_FILES, ENCRYPTED_SEARCH_BATCH_MAX_FILE_BYTES } =
     await import("./trelio-workspace-files.mjs");
   // get_workspace needs only the accepted file inventory. Search and fetch
   // still hydrate their complete text projection on their existing paths.
@@ -15718,8 +15719,14 @@ export const readEncryptedWorkspaceSearchDocuments = async (input) => {
     sizeBytes: file.sizeBytes, contentType: file.contentType });
   const requestInput = { ...input, workspaceHead: input.acceptedHead };
   const readSource = input.readSource ?? (read => read());
-  let files;
-  try { files = await readSource(() => readEncryptedWorkspaceFileManifest(requestInput)); }
+  let files, batchProjectionId;
+  try {
+    files = await readSource(() => readEncryptedWorkspaceFileManifest(requestInput, {
+      onSearchBatchProjection: id => {
+        if (input.token.startsWith("twb_") && !currentWorkspaceExecutionProfile()) batchProjectionId = id;
+      },
+    }));
+  }
   catch (error) {
     // Do not turn ACL, transport, crypto, stale-head or malformed manifests
     // into an alternate read. Only a proven missing derived projection has a
@@ -15773,7 +15780,54 @@ export const readEncryptedWorkspaceSearchDocuments = async (input) => {
   // names need no download; no partial generation is returned or published.
   const small = textDocuments.filter(file => file.sizeBytes <= 1024 * 1024);
   const large = textDocuments.filter(file => file.sizeBytes > 1024 * 1024);
-  for (const [pending, concurrency] of [[small, 4], [large, 1]]) {
+  const deliver = async (document, file, indexed, cacheHit) => {
+    document.chunks = indexed.chunks;
+    document.searchCoverage = indexed.searchCoverage;
+    // Cache entries remain encrypted and exact-head bound. Retention is
+    // optional: its per-entry cap never restricts searchable source content.
+    if (!cacheHit) await input.searchCache?.write(input, file, JSON.stringify(indexed));
+    input.signal?.throwIfAborted();
+    input.onHydrationProgress?.();
+  };
+  let batchedCount = 0;
+  if (batchProjectionId) {
+    const eligible = small.filter(file => file.sizeBytes <= ENCRYPTED_SEARCH_BATCH_MAX_FILE_BYTES);
+    // The verified manifest is size-sorted. Keep at most one batch per
+    // Workspace in flight, and never overlap it with large-file downloads.
+    while (batchedCount < eligible.length) {
+      input.signal?.throwIfAborted();
+      const group = eligible.slice(batchedCount, batchedCount + ENCRYPTED_SEARCH_BATCH_MAX_FILES);
+      const missing = [];
+      const cachedFiles = [];
+      for (const document of group) {
+        const file = byId.get(document.sourceFileId);
+        const cached = await input.searchCache?.read(input, file);
+        if (cached == null) missing.push({ document, file });
+        else cachedFiles.push({ document, file, cached });
+      }
+      if (missing.length >= 2) {
+        let results;
+        try {
+          results = await readSource(() => readEncryptedWorkspaceSearchFileBatch(requestInput,
+            batchProjectionId, missing.map(({ file }) => file)));
+        } catch (error) {
+          // These exact structural refusals occur before reading any object.
+          // ACL, changed revisions, and malformed/corrupt frames fail closed.
+          if (!((error.statusCode === 400 && error.code === "WORKSPACE_SEARCH_BATCH_SIZE_UNSUPPORTED")
+            || (error.statusCode === 429 && error.code === "WORKSPACE_SEARCH_BATCH_BUSY"))) throw error;
+          break;
+        }
+        for (const [index, { document, file }] of missing.entries()) await deliver(document, file, results[index], false);
+      } else if (missing.length === 1) {
+        const { document, file } = missing[0];
+        const indexed = await readSource(() => readEncryptedWorkspaceSearchChunks(requestInput, file));
+        await deliver(document, file, indexed, false);
+      }
+      for (const { document, file, cached } of cachedFiles) await deliver(document, file, JSON.parse(cached), true);
+      batchedCount += group.length;
+    }
+  }
+  for (const [pending, concurrency] of [[small.slice(batchedCount), 4], [large, 1]]) {
     let next = 0;
     let failed = false;
     // Wait for every started worker before returning a conflict or cancellation.
@@ -15790,13 +15844,7 @@ export const readEncryptedWorkspaceSearchDocuments = async (input) => {
           const indexed = cached == null
             ? await readSource(() => readEncryptedWorkspaceSearchChunks(requestInput, file))
             : JSON.parse(cached);
-          document.chunks = indexed.chunks;
-          document.searchCoverage = indexed.searchCoverage;
-          // Scratchpad entries stay encrypted and exact-head bound. The existing
-          // per-entry size guard limits caching only, never search completeness.
-          if (cached == null) await input.searchCache?.write(input, file, JSON.stringify(indexed));
-          input.signal?.throwIfAborted();
-          input.onHydrationProgress?.();
+          await deliver(document, file, indexed, cached != null);
         }
       } catch (error) {
         failed = true;

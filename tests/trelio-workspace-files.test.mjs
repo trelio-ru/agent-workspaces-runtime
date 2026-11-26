@@ -134,14 +134,51 @@ test("small encrypted search files use four bounded workers; large files stay ex
   }
   let mode='ready',smallActive=0,maxSmall=0,largeActive=0,maxLarge=0,largeRequests=0,smallResponses=0,overlap=false;
   let held=[],controller;
+  let batchRequests = 0, eligibleSingles = 0, cachedWrites = 0;
   const server=createServer((request,response)=>{
+    const url = new URL(request.url, "http://127.0.0.1");
+    const useBatch = mode.startsWith("batch");
     if(request.url===`/api/agent-workspaces/workspaces/${workspaceId}`){response.setHeader('content-type','application/json');
-      response.end(JSON.stringify({company:{id:companyId},workspace:{acceptedHead:head},encryption:{browserProjection:{id:projectionId,workspaceHead:head,manifestFileId:manifestId,fileCount:files.length}}}));return;}
+      response.end(JSON.stringify({company:{id:companyId},workspace:{acceptedHead:head},encryption:{browserProjection:{id:projectionId,workspaceHead:head,manifestFileId:manifestId,fileCount:files.length,
+        ...(useBatch ? {searchFileBatchVersion: 1} : {})}}}));return;}
+    if (url.pathname === `/api/agent-workspaces/workspaces/${workspaceId}/encrypted-search-files`) {
+      batchRequests++;
+      assert.equal(url.searchParams.get("head"), head);
+      assert.equal(url.searchParams.get("projectionId"), projectionId);
+      const ids = url.searchParams.get("files").split(",");
+      assert.deepEqual(ids, files.slice(0, 7).map(file => file.id));
+      const rejection = {
+        "batch-busy": [429, "WORKSPACE_SEARCH_BATCH_BUSY"],
+        "batch-denied": [403, "ACCESS_DENIED"],
+        "batch-stale": [409, "WORKSPACE_OUTDATED"],
+      }[mode];
+      if (rejection) {
+        response.writeHead(rejection[0], { "content-type": "application/json" }).end(JSON.stringify({ code: rejection[1] }));
+        return;
+      }
+      const items = ids.map(id => ciphertexts.get(id));
+      const header = Buffer.from(JSON.stringify(ids.map((id, index) => ({
+        id, size: items[index].length, digest: createHash("sha256").update(items[index]).digest("hex"),
+      }))));
+      const length = Buffer.alloc(4);
+      length.writeUInt32BE(header.length);
+      const payload = Buffer.concat([length, header, ...items]);
+      if (mode === "batch-corrupt") payload[payload.length - 1] ^= 1;
+      response.setHeader("x-trelio-workspace-id", workspaceId);
+      response.setHeader("x-trelio-workspace-head", head);
+      response.end(payload);
+      return;
+    }
     const id=/\/files\/([^/]+)\/encrypted-content$/u.exec(request.url)?.[1],bytes=ciphertexts.get(id);
     if(!bytes){response.statusCode=404;response.end();return;}
     response.setHeader('x-trelio-workspace-id',workspaceId);response.setHeader('x-trelio-workspace-head',head);
     response.setHeader('x-trelio-ciphertext-sha256',createHash('sha256').update(bytes).digest('hex'));
     if(id===manifestId){response.end(bytes);return;}
+    if (useBatch) {
+      if (files.slice(0, 7).some(file => file.id === id)) eligibleSingles++;
+      response.end(bytes);
+      return;
+    }
     const large=largeIds.has(id);
     if(large){largeRequests++;largeActive++;maxLarge=Math.max(maxLarge,largeActive);overlap||=smallActive>0||smallResponses!==8;}
     else{smallActive++;maxSmall=Math.max(maxSmall,smallActive);overlap||=largeActive>0;}
@@ -160,9 +197,10 @@ test("small encrypted search files use four bounded workers; large files stay ex
     }else send();
   });
   await new Promise(resolve=>server.listen(0,'127.0.0.1',resolve));
-  const input={origin:`http://127.0.0.1:${server.address().port}`,token:'synthetic-token',companyEncryption,workspaceId,workspaceHead:head,acceptedHead:head};
+  const input={origin:`http://127.0.0.1:${server.address().port}`,token:'twb_synthetic',companyEncryption,workspaceId,workspaceHead:head,acceptedHead:head};
   const staging=path.join(resolveWorkspaceBridgeConfigDirectory(),'search-staging');await mkdir(staging,{recursive:true,mode:0o700});const before=await readdir(staging);
   try{
+    let baseline;
     for(mode of ['ready','corrupt','denied','cancel']){
       smallActive=0;maxSmall=0;largeActive=0;maxLarge=0;largeRequests=0;smallResponses=0;overlap=false;held=[];
       controller=new AbortController();const timer=setTimeout(()=>controller.abort(),15000);
@@ -170,10 +208,31 @@ test("small encrypted search files use four bounded workers; large files stay ex
         const reading=readEncryptedWorkspaceSearchDocuments({...input,signal:controller.signal});
         if(mode==='ready'){
           const documents=await reading;assert.equal(documents.length,files.length);assert.equal(maxSmall,4);assert.equal(maxLarge,1);assert.equal(overlap,false);
+          baseline = documents;
           assert.ok(documents.every(file=>file.searchCoverage.status==='complete'&&file.searchCoverage.indexedBytes===file.sizeBytes));
         }else{await assert.rejects(reading,mode==='denied'?{code:'ACCESS_DENIED'}:undefined);assert.equal(largeRequests,0,'a failed small pool cannot start a large stream');}
         assert.deepEqual(await readdir(staging),before,'all started workers settle and remove private staging before return');
       }finally{clearTimeout(timer);}
+    }
+    for (mode of ["batch-ready", "batch-busy", "batch-denied", "batch-stale", "batch-corrupt"]) {
+      batchRequests = 0;
+      eligibleSingles = 0;
+      cachedWrites = 0;
+      const reading = readEncryptedWorkspaceSearchDocuments({ ...input,
+        searchCache: { read: async () => null, write: async () => { cachedWrites++; } } });
+      if (mode === "batch-ready" || mode === "batch-busy") {
+        assert.deepEqual(await reading, baseline);
+        assert.equal(eligibleSingles, mode === "batch-busy" ? 7 : 0);
+        assert.equal(cachedWrites, files.length);
+      } else {
+        const reason = { "batch-denied": { code: "ACCESS_DENIED" },
+          "batch-stale": { code: "WORKSPACE_OUTDATED" }, "batch-corrupt": /digest/ }[mode];
+        await assert.rejects(reading, reason);
+        assert.equal(eligibleSingles, 0);
+        assert.equal(cachedWrites, 0);
+      }
+      assert.equal(batchRequests, 1);
+      assert.deepEqual(await readdir(staging), before);
     }
   }finally{server.closeAllConnections();await new Promise(resolve=>server.close(resolve));await rm(root,{recursive:true,force:true});}
 });
