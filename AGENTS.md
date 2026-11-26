@@ -32,10 +32,10 @@ publication tooling также остаются вне этого публичн
 
 ## Общие правила
 
-- Encrypted task description edits project canonical mention nodes from the
-  exact document entering the existing local bridge. The native current task
-  ACL and ordinary mention notification own delivery. Keep body text and
-  labels encrypted and never accept model-supplied transport metadata.
+- Encrypted task description edits and direct comment writes project canonical
+  mention nodes from the exact document entering the existing local bridge.
+  Current task ACL and the ordinary native mention path own notification.
+  Keep body text and labels encrypted and reject model-supplied transport metadata.
 
 - [Claude Desktop Code Local navigation](docs/agent-workspace-runtime.md#claude-desktop-local-navigation) uses the private native tab record and a server-confirmed locator; engine IDs never substitute for Desktop tabs.
 - [Browser confirmation](docs/agent-workspace-runtime.md#codex-connection-wizard) opens after verified interactive setup. Recheck the exact local folder after registration and browser confirmation. Late service Git recovery uses the existing planner and CAS for `.gitignore` only. Native approval and folder registration remain independent.

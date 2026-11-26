@@ -2205,17 +2205,22 @@ export const protectLocalActionArguments = async ({
   mirror = null,
   // Trusted native-selected metadata injection, never a model transport hint.
   customFieldTypeForId = null,
-  includeDescriptionMentions = false,
+  includeTaskMentions = false,
 }) => {
   const payloads = [];
   const expectedPayloadValues = {};
   let objectSequence = 0;
   let normalizedArguments = normalizeLocalActionRichTextInputs(rawArguments);
-  if (Object.hasOwn(normalizedArguments, "encryptedTaskDescriptionMentions")) {
+  if (Object.hasOwn(normalizedArguments, "encryptedTaskDescriptionMentions")
+    || Object.hasOwn(normalizedArguments, "encryptedTaskCommentMentions")) {
     throw new TrelioLocalContextError("LOCAL_CONTEXT_INVALID_INPUT", "Protected mention metadata must come from the selected rich-text document.");
   }
-  const descriptionMentions = includeDescriptionMentions && nativeTool === "update_task_description"
-    ? collectLocalRichTextMentions(normalizedArguments.descriptionJson, id => normalizeUuid(id, "mention ID"))
+  const mentionField = nativeTool === "update_task_description" ? "descriptionJson"
+    : ["create_comment", "update_comment"].includes(nativeTool) ? "bodyJson" : null;
+  // Project canonical nodes from the exact document that will be encrypted.
+  // The native task writer checks whether each selected ID is still mentionable.
+  const mentions = includeTaskMentions && mentionField
+    ? collectLocalRichTextMentions(normalizedArguments[mentionField], id => normalizeUuid(id, "mention ID"))
     : null;
   if (nativeTool === 'execute_assistant_operation') {
     const operation=normalizedArguments.operation,fields=normalizedArguments.arguments;
@@ -2610,11 +2615,11 @@ export const protectLocalActionArguments = async ({
     return result;
   };
   const value = await visit(normalizedArguments);
-  // Only the existing native description writer can interpret these
-  // coordinates. Derive them before encryption from the document we upload;
-  // do not send the body, labels, usernames or any broad audience inventory.
-  if (descriptionMentions && (descriptionMentions.memberIds.length || descriptionMentions.groupIds.length)) {
-    value.encryptedTaskDescriptionMentions = descriptionMentions;
+  // Only the matching native writer can use these coordinates. The payload
+  // keeps the body, labels and usernames encrypted.
+  if (mentions && (mentions.memberIds.length || mentions.groupIds.length)) {
+    const key = mentionField === "descriptionJson" ? "encryptedTaskDescriptionMentions" : "encryptedTaskCommentMentions";
+    value[key] = mentions;
   }
   return {
     value,
@@ -10448,7 +10453,7 @@ const executeTrelioLocalActionOperation = async (
         arguments: canonicalArguments,
         companyEncryption: provider.companyEncryption,
         mirror: actionMirror,
-        includeDescriptionMentions: true,
+        includeTaskMentions: true,
       });
   await uploadLocalActionPayloads({
     origin: provider.requestOrigin,

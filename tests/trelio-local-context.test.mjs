@@ -2764,7 +2764,7 @@ test("local action protects nested task content and converts Markdown before upl
     arguments: { companySlug: "acme", projectSlug: `e-${actionRunId}`, taskNumber: 9,
       clientRequestId: "description-metadata-test", descriptionJson: description },
   };
-  const localDescription = await protectLocalActionArguments({ ...descriptionOptions, includeDescriptionMentions: true });
+  const localDescription = await protectLocalActionArguments({ ...descriptionOptions, includeTaskMentions: true });
   assert.deepEqual(localDescription.value.encryptedTaskDescriptionMentions, {
     memberIds: [memberId], groupIds: [groupId],
   });
@@ -2777,9 +2777,24 @@ test("local action protects nested task content and converts Markdown before upl
   });
   assert.deepEqual(decryptedDescription.values.description_json, description);
   assert.equal((await protectLocalActionArguments(descriptionOptions)).value.encryptedTaskDescriptionMentions, undefined);
-  await assert.rejects(protectLocalActionArguments({ ...descriptionOptions, includeDescriptionMentions: true,
+  await assert.rejects(protectLocalActionArguments({ ...descriptionOptions, includeTaskMentions: true,
     arguments: { ...descriptionOptions.arguments, encryptedTaskDescriptionMentions: { memberIds: [memberId], groupIds: [] } },
   }), { code: "LOCAL_CONTEXT_INVALID_INPUT" });
+
+  for (const nativeTool of ["create_comment", "update_comment"]) {
+    const commentOptions = {
+      nativeTool, companyEncryption, includeTaskMentions: true,
+      arguments: { companySlug: "acme", projectSlug: `e-${actionRunId}`, taskNumber: 9, bodyJson: description },
+    };
+    const comment = await protectLocalActionArguments(commentOptions);
+    assert.deepEqual(comment.value.encryptedTaskCommentMentions, { memberIds: [memberId], groupIds: [groupId] });
+    assert.ok(comment.value.bodyJson.$trelioE2ee);
+    assert.equal(Object.hasOwn(comment.value, "encryptedTaskDescriptionMentions"), false);
+    assert.doesNotMatch(JSON.stringify(comment.value), /private-mention-name|private description|@not-a-mention/u);
+    await assert.rejects(protectLocalActionArguments({
+      ...commentOptions, arguments: { ...commentOptions.arguments, encryptedTaskCommentMentions: {} },
+    }), { code: "LOCAL_CONTEXT_INVALID_INPUT" });
+  }
 
   const launchPath = "/Users/Fixture/Private company folder  ";
   const launch = await protectLocalActionArguments({ nativeTool: "register_codex_folder",
