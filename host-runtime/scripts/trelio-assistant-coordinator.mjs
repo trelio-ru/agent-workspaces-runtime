@@ -2627,6 +2627,16 @@ export const createAssistantCoordinator = ({ database, client, native, workspace
           return true;
         }
         if(continued?.workspaceDraft||continued?.taskReadParent||continued?.namedArchiveSettled&&!continued.started)return true;
+        if(continued?.started&&!continued.capacity&&!continued.namedArchiveSettled
+          &&inbox.readPassContinuationPrerequisite(job.deliveryId)){
+          // The ordinary continuation already had its chance to recover
+          // this outcome. Starting it again without a new witness just
+          // renews the device-wide lease. Match the last turn under the
+          // exclusive native writer and retire only after server expiry.
+          // Old unkeyed hook attempts keep their existing repair path. The
+          // original task, events and unknown effects stay unsettled.
+          return !await retireInterruptedWriter(job,saved,threadId,signal,continued,result);
+        }
         return continueTerminalPass(job,result,signal,marker);
       }
       notices.clear();

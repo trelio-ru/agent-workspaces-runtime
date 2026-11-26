@@ -214,6 +214,11 @@ retire its expired writer and admit another task. It binds the latest persisted
 resume and start to their exact turn ID, marker and status under exclusive native
 ownership, with an empty queue and the current server retirement receipt. The same
 check applies when a completed continuation has spent this prerequisite's budget.
+An ordinary continuation with a recorded prerequisite fingerprint that
+completes without a business receipt uses the same retirement as soon as its
+current lease expires. It does not renew solely to repeat the outcome check.
+Historical unkeyed hook attempts and specialized recovery with a positive
+draft, accepted-file or native receipt witness keep their existing paths.
 The pending task outcome and every old start remain in the journal.
 Switching back to a spent fingerprint does not reset its count. A newly repaired
 definition/runtime may therefore continue the retained pass automatically; a

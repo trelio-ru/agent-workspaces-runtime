@@ -175,6 +175,10 @@ publication tooling также остаются вне этого публичн
   questions or recover health without a real business completion. No diagnostic
   poll, claim,
   migration, ACK or active-process inference from retained uncertain markers.
+  An ordinary completed continuation without a business receipt retires its
+  own expired writer using the same exact native marker and server CAS.
+  It does not start another generic continuation. Keep the task's unknown
+  effects, native events and old starts intact while unrelated tasks proceed.
   SAME journal v11 retains only closed original delivery code/stage, atomically
   with uncertainty; old causes stay null. Status batches native-selected pairs
   through ONE existing account/model RPC under its original deadline, without

@@ -5230,9 +5230,14 @@ test(`one scoped owner-answer refusal permits another independently verified ans
   await f.coordinator.close();
 });
 
-for(const ending of ['confirmed','interrupted','budget'])
+for(const ending of ['confirmed','interrupted','completed_pending','budget'])
 test(`a completed restricted pass resumes on its own marker after rereading the protected slot (${ending})`,async t=>{
   const f=fixture(t);
+  if(ending==='completed_pending'){
+    // The current native worker has an observed prerequisite fingerprint.
+    // Historical unkeyed hook attempts still use the existing repair path.
+    f.options.native.readPrerequisites=async()=>({fingerprint:'a'.repeat(64)});
+  }
   f.authority.workMode='task';
   await f.coordinator.pollOnce();
   await f.coordinator.workOnce();
@@ -5327,7 +5332,8 @@ test(`a completed restricted pass resumes on its own marker after rereading the 
       live.leaseRevision=20;
     }
     const lastTurn=randomUUID(),receipt=`codex:${pass.threadId}:${lastTurn}`;
-    const stopped=ending==='budget'?{state:'completed',turnId:lastTurn,receipt}:{state:'uncertain',turnId:lastTurn};
+    const completed=ending==='budget'||ending==='completed_pending';
+    const stopped=completed?{state:'completed',turnId:lastTurn,receipt}:{state:'uncertain',turnId:lastTurn};
     f.deliveries.set(lastMarker,stopped);
     f.advance(21*60_000);
     live.state='review_required';
@@ -5349,7 +5355,7 @@ test(`a completed restricted pass resumes on its own marker after rereading the 
     let permit=false,underWriter=false,retirements=0;
     f.options.native.withWriter=async(thread,cwd,action,options)=>{
       assert.equal(thread,pass.threadId);
-      assert.deepEqual(options.stoppedContinuation,{deliveryId:lastMarker,turnId:lastTurn,status:ending==='budget'?'completed':'interrupted'});
+      assert.deepEqual(options.stoppedContinuation,{deliveryId:lastMarker,turnId:lastTurn,status:completed?'completed':'interrupted'});
       if(!permit)throw Object.assign(new Error('still owned'),{code:'ASSISTANT_CODEX_THREAD_BUSY'});
       underWriter=true;
       try{return await action(options.signal);}finally{underWriter=false;}
@@ -5375,6 +5381,17 @@ test(`a completed restricted pass resumes on its own marker after rereading the 
         await restarted.workOnce();
         assert.equal(inbox.readTaskWriterRetirementAttempt(child.deliveryId),null);
         f.deliveries.set(lastMarker,stopped);
+      }
+      if(ending==='completed_pending'){
+        // A live lease must still exclude the next task, even when the
+        // native turn already reports completion without a business receipt.
+        live.state='leased';
+        live.leaseExpiresAt=new Date(f.options.now()+60_000).toISOString();
+        assert.equal((await restarted.workOnce()).state,'blocked');
+        assert.equal(inbox.readTaskWriterRetirementAttempt(child.deliveryId),null);
+        assert.deepEqual(started,[marker]);
+        f.advance(60_000);
+        live.state='review_required';
       }
       await assert.rejects(restarted.workOnce(),{code:'ASSISTANT_CODEX_THREAD_BUSY'});
       assert.equal(retirements,0);
