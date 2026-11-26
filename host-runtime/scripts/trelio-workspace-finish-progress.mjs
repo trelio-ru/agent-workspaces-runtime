@@ -83,14 +83,14 @@ export const createWorkspaceFinishOperations = ({ waitMs = 10_000, retentionMs =
     nextCall: { tool: toolName, arguments: entry.pollAction },
     instruction,
   });
-  const wait = async (entry, signal) => {
+  const wait = async (entry, signal, budgetMs = waitMs) => {
     signal?.throwIfAborted();
     let timer;
     let onAbort;
     try {
       await Promise.race([
         entry.done,
-        new Promise((resolve) => { timer = setTimeout(resolve, waitMs); }),
+        new Promise((resolve) => { timer = setTimeout(resolve, budgetMs); }),
         new Promise((_, reject) => {
           onAbort = () => reject(signal.reason ?? new Error("Poll aborted"));
           signal?.addEventListener("abort", onAbort, { once: true });
@@ -119,7 +119,7 @@ export const createWorkspaceFinishOperations = ({ waitMs = 10_000, retentionMs =
     },
     has(key, id) { return entries.get(key)?.id === id; },
     active(key) { const entry = entries.get(key); return entry?.state === "running" ? snapshot(entry) : null; },
-    async start({ key, scope, fingerprint, pollAction, execute, signal, background = false }) {
+    async start({ key, scope, fingerprint, pollAction, execute, signal, background = false, initialWaitMs = waitMs }) {
       signal?.throwIfAborted();
       prune();
       let entry = entries.get(key);
@@ -156,9 +156,9 @@ export const createWorkspaceFinishOperations = ({ waitMs = 10_000, retentionMs =
       }, (error) => {
         entry.state = "failed"; entry.error = error; entry.endedAt = Date.now();
       }));
-      // Search can register its bounded replacement before returning the
-      // next poll. Finish callers still wait on the same cancellable receipt.
-      return background ? snapshot(entry) : wait(entry, signal);
+      // A new search can wait longer than a poll. Its bounded replacement
+      // still starts in the background, and existing callers use waitMs.
+      return background ? snapshot(entry) : wait(entry, signal, initialWaitMs);
     },
     async poll(key, id, signal, scope) {
       const entry = entries.get(key);
@@ -176,7 +176,7 @@ export const createWorkspaceFinishOperations = ({ waitMs = 10_000, retentionMs =
  * failed-entry replacement. A poll is an exact retained operation, not replay.
  * Only a bounded answer lives here; the isolated reader owns the corpus. */
 export const createCompanySearchOperations = ({ authorize, execute, validate, closeReader = async () => {},
-  isValidationConflict = () => false, waitMs = 10_000, timeoutMs = 2 * 60 * 60_000, idleMs = 10 * 60_000,
+  isValidationConflict = () => false, initialWaitMs = 15_000, waitMs = 10_000, timeoutMs = 2 * 60 * 60_000, idleMs = 10 * 60_000,
   retentionMs = 600_000, errorFactory = operationError } = {}) => {
   const operations = createWorkspaceFinishOperations({ waitMs, errorFactory });
   let current = null, closed = false;
@@ -220,7 +220,7 @@ export const createCompanySearchOperations = ({ authorize, execute, validate, cl
     const attempt = { refresh, settled: false, validations: 0 };
     entry.attempt = attempt;
     const waiting = operations.start({
-      key: "search", scope: entry.binding, fingerprint: entry.fingerprint, signal, pollAction: {}, background: refresh,
+      key: "search", scope: entry.binding, fingerprint: entry.fingerprint, signal, pollAction: {}, background: refresh, initialWaitMs,
       execute: async () => {
         const operationSignal = entry.controller.signal;
         const idleTimerForRemainingBudget = () => setTimeout(() => controllerAbort(entry, "idle"),

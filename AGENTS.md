@@ -603,7 +603,8 @@ publication tooling также остаются вне этого публичн
   Human company search готовит полный снимок и ищет в одном изолированном
   процессе. Подтверждённая обработка файлов или Workspace обновляет 10-минутный
   idle deadline, exact admitted poll — отдельный 10-минутный observer deadline,
-  общий предел 2 часа не продлевается. Short waits продолжают exact операцию.
+  общий предел 2 часа не продлевается. Первое ожидание 15 секунд, poll —
+  10 секунд в той же exact операции.
   Только временный gateway 502/503/504 на read допускает bounded повтор
   конкретного шага под исходным бюджетом и теми же ACL/ревизиями. При занятом mirror writer поиск строит current RAM
   snapshot тем же builder/fences без ожидания, stale fallback или shared writes.

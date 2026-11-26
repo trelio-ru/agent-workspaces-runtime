@@ -16,7 +16,42 @@ const pending = () => { let resolve, reject; const promise = new Promise((ok, fa
 
 const searchInput = { companySlug: "synthetic", nativeTool: "search", operation: "native_read", arguments: { queries: ["PRIVATE_QUERY"] } };
 const searchValue = { generation: "a".repeat(64), result: { provider: "local_company_context", results: [{ title: "PRIVATE_ANSWER" }] } };
-const searchOptions = { authorize: async () => ({ binding: "recipient" }), validate: async () => true, waitMs: 2 };
+const searchOptions = { authorize: async () => ({ binding: "recipient" }), validate: async () => true, initialWaitMs: 2, waitMs: 2 };
+
+test("a new company search waits 15 seconds and its continuation waits 10", async t => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const completion = pending();
+  const reader = createCompanySearchOperations({
+    authorize: searchOptions.authorize, validate: searchOptions.validate, execute: () => completion.promise,
+  });
+  t.after(async () => { completion.resolve(searchValue); await reader.close(); });
+  const origin = "https://synthetic.invalid";
+  const flush = () => new Promise(resolve => setImmediate(resolve));
+
+  let firstReturned = false;
+  const first = reader.read(origin, searchInput).then(value => { firstReturned = true; return value; });
+  await flush();
+  t.mock.timers.tick(14_999);
+  await flush();
+  assert.equal(firstReturned, false);
+  t.mock.timers.tick(1);
+  const status = await first;
+  assert.equal(status.state, "preparing");
+
+  const pollInput = status.nextCall.arguments.parameters;
+  const poll = () => reader.read(origin, pollInput, { operationId: status.operationId });
+  let pollReturned = false;
+  const second = poll().then(value => { pollReturned = true; return value; });
+  await flush();
+  t.mock.timers.tick(9_999);
+  await flush();
+  assert.equal(pollReturned, false);
+  t.mock.timers.tick(1);
+  assert.equal((await second).operationId, status.operationId);
+
+  completion.resolve(searchValue);
+  assert.deepEqual(await poll(), searchValue.result);
+});
 
 test("company search shares one isolated preparation, survives short wait cancellation and delivers once", async () => {
   const prepared = pending();

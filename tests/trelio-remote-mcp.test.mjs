@@ -4195,7 +4195,7 @@ test("human search preparation keeps its original query and exact poll through t
   const { createCompanySearchOperations } = await import("../host-runtime/scripts/trelio-workspace-finish-progress.mjs");
   let release, launches = 0;
   const gate = new Promise(resolve => { release = resolve; });
-  const manager = createCompanySearchOperations({ waitMs: 1, authorize: async () => ({ binding: "same-recipient" }),
+  const manager = createCompanySearchOperations({ initialWaitMs: 1, waitMs: 1, authorize: async () => ({ binding: "same-recipient" }),
     validate: async () => true, execute: async () => { launches++; await gate; return { generation: "a".repeat(64),
       result: { provider: "local_company_context", results: [{ id: "workspace:11111111-1111-4111-8111-111111111111", type: "workspace" }] } }; } });
   const original = { schemaVersion: 1, route: "context", parameters: { operation: "native_read", companySlug: "synthetic",

@@ -206,7 +206,9 @@ refresh – прежний короткий срок.
 инвентарь и ревизии). Сервер без поддержки узких проекций возвращает прежний
 manifest. Host фильтрует его перед расшифровкой и также не загружает файлы.
 
-Общий short-wait registry ждёт до 10 секунд после свежего admission.
+После свежего admission первый вызов поиска ждёт готовности до 15 секунд,
+повторные проверки ждут до 10 секунд. Срок фоновой операции отсчитывается
+от её первоначального запуска.
 `state=preparing`, readOnly, operationId, elapsedMs, закрытый этап и timings не
 являются результатом поиска. Exact nextCall содержит company, method,
 `operation=search_poll`, пустые arguments и `parameters.searchOperationId`.
