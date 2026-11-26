@@ -2225,8 +2225,8 @@ the ordinary watchdog. Test the real coordinator and native executor together fo
 an answered notification and scheduled reconciliation with/without an answer.
 For a terminal reconciliation turn, re-read the protected pass by value and verify its original restriction in every v2 continuation response. See [automatic terminal continuation](docs/assistant-scheduler.md#automatic-terminal-continuation).
 Resume that calendar check's own draft or accepted Run and preserve later edits to its WORK.
-The admitted calendar work has its own native turn input. Keep provider-command guidance
-out of that input and retain the original marker and task-scope header.
+Calendar work keeps its own native input, marker and scope header. Signed read-only
+commands check new source intervals with existing accounts. The old action stays fenced.
 After a stopped continuation, bind its last start, marker and stored turn under
 the exclusive native writer before retiring its lease. Keep its business fence.
 After another interrupted owner-answer, verify the closed pass, original

@@ -3989,7 +3989,7 @@ test('a fresh calendar carry prepares its own Run before reading pinned authorit
       assert.match(text,/retired Run is only the source of the checkpoint/);
       assert.match(text,/prepare_assistant_workspace_run with a clientRequestId and without runId or workspaceId.+returned open, then read both pinned authority files.+authorityReads/);
       assert.match(text,/authorityReads[\s\S]+carry_forward[\s\S]+complete_assistant_pass/);
-      assert.doesNotMatch(text,/Use already found references and signed read-only skill commands/);
+      assert.match(text,/new source interval through verified read-only skill commands on the existing linked account/);
       assert.ok(!text.includes(retiredReconcile.passId));
       assert.ok(!text.includes(retiredReconcile.writerRetirementReceiptId));
     },executionPolicy(request,response){
@@ -4024,8 +4024,8 @@ test('a continued scheduled check reopens its own draft and preserves later WORK
       assert.match(text,/own earlier tool results identify it. Reopen that exact Run/);
       assert.match(text,/If already accepted, verify and reuse that revision/);
       assert.match(text,/Preserve its later edits.+If this check has no own Run yet, call prepare_assistant_workspace_run/);
-      assert.match(text,/Keep that external action on hold/);
-      assert.doesNotMatch(text,/Use already found references and signed read-only skill commands/);
+      assert.match(text,/Keep the previous unverified external action on hold/);
+      assert.match(text,/Do not replay the old invocation/);
     },executionPolicy(request,response){
       if(request.method==='mcpServerStatus/list')
         response.result.data[0].tools=Object.fromEntries(ASSISTANT_RECONCILE_TASK_TOOLS.map(tool=>[tool,{name:tool}]));

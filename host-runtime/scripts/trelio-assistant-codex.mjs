@@ -4321,7 +4321,7 @@ const calendarReconciliationInstructions=(material,continuation)=>{
   return [
     phase,
     material==='carry'?carry.join(' '):'Read the current accepted WORK and follow the ordinary scheduled noChange rules.',
-    'The previous owner answer was delivered. Keep that external action on hold. This check can read its own task, canonical material, local account inventory and immutable signed guide pages only. Site, login, messaging and provider commands are unavailable.',
+    'Keep the previous unverified external action on hold. In this new scheduled slot, read the latest task and canonical material, then check the new source interval through verified read-only skill commands on the existing linked account. Do not replay the old invocation. Arbitrary browser actions, account setup, sending and marking sources are unavailable.',
     'After verifying the accepted result, use complete_assistant_pass to confirm the actual goal state and the existing cadence.',
   ];
 };

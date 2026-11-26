@@ -930,16 +930,21 @@ test('a restricted task starts only declared read commands and performs no accou
     parsed.files=[];await assert.rejects(f.run({captureMode:'assistant_task',runtimeArguments:['read']}),{code:'ASSISTANT_CAPABILITY_UNAVAILABLE'});
     assert.equal(await fs.readFile(file,'utf8'),'read --target example\n');
   });
-  // Only host-owned local account inventory and immutable documentation are
-  // available when an earlier navigation's outcome is uncertain.
+  // An independent scheduled slot may read the source under the same signed
+  // policy. It cannot inherit the previous browser or provider mutation.
   parsed.files=[{path:'trelio-assistant-execution.json',bytes:Buffer.from(JSON.stringify(policy))}];
   await withWorkspaceExecutionProfile({...profile,retiredScheduled:{
     writerRetirementReceiptId:profile.retiredReconcile.writerRetirementReceiptId,dueAt:Date.now()}},async()=>{
     await prepareSkillAccount({...f.input,origin:identity.origin,runtimeArguments:['account','list'],
       discover:()=>assert.fail('no account import'),output:value=>assert.deepEqual(value.accounts,[])});
-    for(const args of [['read','--target','example'],['guides'],['account','list'],['send']])
-      await assert.rejects(f.run({captureMode:'assistant_task',runtimeArguments:args}),{code:'ASSISTANT_CAPABILITY_UNAVAILABLE'});
-    assert.equal(await fs.readFile(path.join(f.input.runtimeDirectory,'calls'),'utf8'),'read --target example\n');
+    const next = await f.run({captureMode:'assistant_task',runtimeArguments:['read','--target','new-period']});
+    assert.equal(next.stdout,'known-result');
+    assert.equal(next.taskReadOnly,true);
+    for(const args of [['guides'],['account','list'],['send'],['read','--confirm']])
+      await assert.rejects(f.run({captureMode:'assistant_task',runtimeArguments:args}),error=>
+        ['ASSISTANT_CAPABILITY_UNAVAILABLE','ASSISTANT_SKILL_COMMAND_DENIED'].includes(error.code));
+    assert.equal(await fs.readFile(path.join(f.input.runtimeDirectory,'calls'),'utf8'),
+      'read --target example\nread --target new-period\n');
   });
 });
 

@@ -144,9 +144,9 @@ uses a new one only when none exists. Use `use_assistant_workspace_files`
 with `{"action":"carry_forward"}` in that destination Run. The host
 compares the accepted and checkpoint Git blobs and the destination bytes under
 the new Run's lock. The first pass records its actual result in its own Run.
-Later due periods use their own last accepted WORK. This restriction permits
-local account inventory and immutable guide pages from verified packages.
-The external action's outcome stays open. If a third writer stops, its own
+Later due periods use their own last accepted WORK. The same signed read-only
+skill rules used by other reconciliation passes apply to new source intervals.
+The old external action stays fenced. If a third writer stops, its own
 verified retirement releases the device while each prior outcome remains on
 the affected task.
 

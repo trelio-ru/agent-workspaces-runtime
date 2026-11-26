@@ -9737,11 +9737,12 @@ const runMaterializedAgentSkillUnqueued = async ({
   // This flag comes only from the verified current pass. Recheck at the last
   // shared executor so a differently composed caller cannot switch capture
   // modes, supply setup grants or turn an ordinary command into a read.
-  // A stopped answer may have navigated to an unobserved destination. Its
-  // next calendar check may inspect installed guides and local account
-  // inventory; neither enters this shared provider process.
-  if (profile?.retiredScheduled) throw Object.assign(new Error('ASSISTANT_CAPABILITY_UNAVAILABLE'),{code:'ASSISTANT_CAPABILITY_UNAVAILABLE'});
-  if (profile?.retiredReconcile && (!taskCapture || !captureOutput || privateSetup || prepareSetupEnvironment
+  // Carrying a checkpoint into a later scheduled slot does not reopen the
+  // original invocation. Like any reconciliation, the new pass can execute
+  // only a command the signed package declares read-only, under current
+  // task/account authority and without any setup grant or injected input.
+  if (profile?.retiredScheduled && !profile.retiredReconcile
+    || profile?.retiredReconcile && (!taskCapture || !captureOutput || privateSetup || prepareSetupEnvironment
     || Object.keys(grantedEnvironment).length || grantedStdin !== null
     || assertAssistantTaskSkillCommand(artifact.parsedPackage,runtimeArguments) !== 'read_only'))
     throw Object.assign(new Error('ASSISTANT_CAPABILITY_UNAVAILABLE'),{code:'ASSISTANT_CAPABILITY_UNAVAILABLE'});
@@ -10663,7 +10664,7 @@ const skillCommand = async (
     if (resolution.artifact.contentProtection!=='plain'||resolution.trust.level!=='platform_verified'
       ||resolution.trust.artifactLevel!=='platform_verified'||resolution.trust.requiresDeviceConsent
       ||setupCommand||privateSecretSetup||humanInputSetup||controllerCommand||Object.keys(grantedEnvironment).length||grantedStdin!==null
-      ||accountCommand&&!inventory||(!inventory&&!readsSignedGuide&&(profile.retiredScheduled||assertAssistantTaskSkillCommand(parsed,args)!=='read_only')))
+      ||accountCommand&&!inventory||(!inventory&&!readsSignedGuide&&assertAssistantTaskSkillCommand(parsed,args)!=='read_only'))
       throw Object.assign(new Error('ASSISTANT_CAPABILITY_UNAVAILABLE'),{code:'ASSISTANT_CAPABILITY_UNAVAILABLE'});
   }
   const humanInputCommand = humanInputSetup === null ? null : readSkillHumanInputSetupCommand(artifactForCache.parsedPackage, humanInputSetup.commandId);
