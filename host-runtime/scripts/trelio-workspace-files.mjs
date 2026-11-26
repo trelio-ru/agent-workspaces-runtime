@@ -269,10 +269,33 @@ const openEncryptedFile = async ({ origin, token, companyEncryption, workspaceId
   } finally { ciphertext.fill(0); }
 };
 
+// A protected manifest can contain arbitrary JSON fields. Only the native
+// ACL-checked inventory may set this process-only receipt.
+const VERIFIED_SEARCH_CIPHERTEXT = Symbol("verified search ciphertext");
+export const verifiedWorkspaceSearchCiphertextDigest = file => file[VERIFIED_SEARCH_CIPHERTEXT];
+
+const readSearchFileReceipts = (inventory, projectionId, scope, count) => {
+  if (inventory === undefined) return null;
+  if (inventory?.projectionId !== projectionId || inventory.scopeId !== scope.id
+    || inventory.scopeEpoch !== scope.epoch || !Array.isArray(inventory.files)
+    || inventory.files.length !== count || inventory.files.length > 10_000) fail("WORKSPACE_FILE_MANIFEST_INVALID");
+  const receipts = new Map();
+  for (const row of inventory.files) {
+    if (!Array.isArray(row) || row.length !== 3) fail("WORKSPACE_FILE_MANIFEST_INVALID");
+    const [id, digest, size] = row;
+    if (typeof id !== "string" || !UUID.test(id) || receipts.has(id)
+      || typeof digest !== "string" || !/^[a-f0-9]{64}$/u.test(digest)
+      || !Number.isSafeInteger(size) || size < 0) fail("WORKSPACE_FILE_MANIFEST_INVALID");
+    receipts.set(id, { digest, size });
+  }
+  return receipts;
+};
+
 /** Names and paths leave this function only on the trusted device. HTTP uses opaque UUIDs. */
 export const readEncryptedWorkspaceFileManifest = async (input, { onSearchBatchProjection } = {}) => {
   const overview = await readJsonResponse(await request(input.origin, input.token,
-    `/api/agent-workspaces/workspaces/${input.workspaceId}`, { signal: input.signal }));
+    `/api/agent-workspaces/workspaces/${input.workspaceId}`, { signal: input.signal,
+      ...(input.includeSearchFileInventory ? { headers: { "x-trelio-search-file-inventory": "1" } } : {}) }));
   const projection = overview?.encryption?.browserProjection;
   if (overview?.company?.id !== input.companyEncryption.runtime.company.id) fail("WORKSPACE_FILE_ENCRYPTION_BINDING_INVALID");
   if (overview?.workspace?.acceptedHead && overview.workspace.acceptedHead !== input.workspaceHead) fail("WORKSPACE_OUTDATED");
@@ -302,10 +325,17 @@ export const readEncryptedWorkspaceFileManifest = async (input, { onSearchBatchP
       || manifest.projectionId !== projection.id || manifest.workspaceId !== input.workspaceId
       || manifest.workspaceHead !== input.workspaceHead || !Array.isArray(manifest.files)
       || manifest.files.length !== Number(projection.fileCount)) fail("WORKSPACE_FILE_MANIFEST_INVALID");
+    const receipts = readSearchFileReceipts(input.includeSearchFileInventory ? overview.encryption?.searchFileInventory : undefined,
+      projection.id, input.companyEncryption.runtime.scope, manifest.files.length);
     const paths = new Set();
     const ids = new Set();
     for (const file of manifest.files) {
       validateWorkspaceFileLocator({ ...input, filePath: file.path });
+      if (receipts) {
+        const receipt = receipts.get(file.id);
+        if (!receipt || receipt.size !== file.sizeBytes) fail("WORKSPACE_FILE_MANIFEST_INVALID");
+        file[VERIFIED_SEARCH_CIPHERTEXT] = receipt.digest;
+      }
       if (!UUID.test(String(file.id)) || ids.has(file.id) || paths.has(file.path)
         || !Number.isSafeInteger(file.sizeBytes) || file.sizeBytes < 0
         || typeof file.contentType !== "string" || file.contentType.length > 2048) fail("WORKSPACE_FILE_MANIFEST_INVALID");
@@ -416,6 +446,11 @@ export const readEncryptedWorkspaceSearchChunks = async (input, file) => {
       || response.headers.get("x-trelio-workspace-head") !== input.workspaceHead) {
       await response.body?.cancel();
       fail("WORKSPACE_OUTDATED");
+    }
+    const expectedDigest = verifiedWorkspaceSearchCiphertextDigest(file);
+    if (expectedDigest && response.headers.get("x-trelio-ciphertext-sha256") !== expectedDigest) {
+      await response.body?.cancel();
+      fail("WORKSPACE_FILE_ENCRYPTION_BINDING_INVALID");
     }
     handle = await fs.open(sourcePath, "wx", 0o600);
     if (process.platform === "win32") await hardenWindowsPrivatePath(sourcePath, "file");

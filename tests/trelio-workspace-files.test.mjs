@@ -8,7 +8,7 @@ import test from "node:test";
 import { createAgentEncryptionDevice, encryptFileToCompanyContainer } from "../host-runtime/scripts/trelio-company-encryption.mjs";
 import { readEncryptedWorkspaceFileManifest, readEncryptedWorkspaceSearchChunks, readEncryptedWorkspaceSelectedFile, validateWorkspaceFileLocator, workspaceFileLocatorFromResultId } from "../host-runtime/scripts/trelio-workspace-files.mjs";
 import { matchWorkspaceTextChunks } from "../host-runtime/scripts/trelio-workspace-text-chunks.mjs";
-import { createEncryptedSearchFileCache, handleNativeLocalContextRead, syncCompanyContextMirror, resolveMirrorPaths } from "../host-runtime/scripts/trelio-local-context.mjs";
+import { createEncryptedSearchFileCache, handleNativeLocalContextRead, searchCompanyContextMirror, syncCompanyContextMirror, resolveMirrorPaths } from "../host-runtime/scripts/trelio-local-context.mjs";
 import { readEncryptedWorkspaceSearchDocuments, resolveWorkspaceBridgeConfigDirectory, resolveCompanyContextMirrorDirectory,
   runGit, withEncryptedAcceptedWorkspaceFiles, readAcceptedWorkspaceBlob, withWorkspaceExecutionProfile } from "../host-runtime/scripts/trelio-workspace.mjs";
 
@@ -435,6 +435,111 @@ test("advertised exact file ids share one bounded decode and reject unsafe coord
 // fully verified Workspace prefix, not spend that second deadline fetching
 // every old overview/manifest again. Exercise the real HTTP/file/HPKE/mirror
 // path with a disposable profile, then reopen it like a fresh request process.
+test("fresh encrypted search inventory reuses 99 unchanged files across heads and excludes deletions", async t => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "trelio-search-reuse-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const [companyId, workspaceId, scopeId, deviceId] = Array.from({ length: 4 }, () => randomUUID());
+  const scope = await webcrypto.subtle.generateKey({ name: "ECDH", namedCurve: "P-256" }, true, ["deriveBits"]);
+  const device = await createAgentEncryptionDevice();
+  const publicJwk = await webcrypto.subtle.exportKey("jwk", scope.publicKey);
+  const company = { id: companyId, slug: "synthetic", name: "Synthetic search" };
+  const companyEncryption = { runtime: { company, scope: { id: scopeId, epoch: 1, publicEncryptionJwk: publicJwk }, device: { id: deviceId } },
+    scopePrivateEncryptionKey: { privateKey: scope.privateKey, privateJwk: await webcrypto.subtle.exportKey("jwk", scope.privateKey) } };
+  const containers = new Map();
+  const seal = async (id, kind, content) => {
+    const sourcePath = path.join(root, "source"), destinationPath = path.join(root, id);
+    await writeFile(sourcePath, content);
+    await encryptFileToCompanyContainer({ sourcePath, destinationPath, scopePublicEncryptionJwk: publicJwk,
+      aad: { companyId, scopeId, scopeEpoch: 1, entityType: `agent_workspace_browser_${kind}`, entityId: id, entityRevision: 1 },
+      originalName: "synthetic", mimeType: "text/plain", writerDeviceId: deviceId, signingPrivateKey: device.privateKeys.signingPrivateKey });
+    const bytes = await readFile(destinationPath);
+    containers.set(id, { bytes, digest: createHash("sha256").update(bytes).digest("hex") });
+  };
+  const makeFile = async (index, text) => {
+    const id = randomUUID();
+    const content = Buffer.from(text);
+    await seal(id, "file", content);
+    return { id, path: `file-${index}.md`, sizeBytes: content.length, contentType: "text/plain" };
+  };
+  const original = [];
+  for (let index = 0; index < 100; index++) {
+    original.push(await makeFile(index, index === 99 ? "убираемый документ" : `старый текст ${index}`));
+  }
+  const updated = await makeFile(0, "поставка изменена");
+  let current;
+  const useHead = async (letter, accepted, described = accepted) => {
+    const head = letter.repeat(40), projectionId = randomUUID(), manifestFileId = randomUUID();
+    await seal(manifestFileId, "manifest", JSON.stringify({ schemaVersion: 1, kind: "agent-workspace-browser-manifest",
+      projectionId, workspaceId, workspaceHead: head, files: described }));
+    current = { head, projectionId, manifestFileId, accepted, generation: letter.repeat(64), count: described.length };
+  };
+  await useHead("a", original);
+  const downloaded = [];
+  let canReadWorkspace = true;
+  const server = createServer((request, response) => {
+    const json = data => response.setHeader("content-type", "application/json").end(JSON.stringify(data));
+    if (request.url === "/api/agent-workspaces/company-context/synthetic/manifest") {
+      return json({ schemaVersion: 2, provider: "local_company_context", company, generation: current.generation,
+        viewer: { memberId: deviceId }, projects: [], tasks: [], contextDocuments: [], searchDocuments: [],
+        instructions: {}, acceptedWorkspaces: [{ id: workspaceId, acceptedHead: current.head }] });
+    }
+    if (request.url === `/api/agent-workspaces/workspaces/${workspaceId}`) {
+      if (!canReadWorkspace) {
+        response.statusCode = 403;
+        return json({ code: "ACCESS_DENIED" });
+      }
+      assert.equal(request.headers["x-trelio-search-file-inventory"], "1");
+      return json({ company, workspace: { acceptedHead: current.head }, encryption: {
+        browserProjection: { id: current.projectionId, manifestFileId: current.manifestFileId,
+          workspaceHead: current.head, fileCount: current.count },
+        searchFileInventory: { projectionId: current.projectionId, scopeId, scopeEpoch: 1,
+          files: current.accepted.map(file => [file.id, containers.get(file.id).digest, file.sizeBytes]) },
+      } });
+    }
+    const id = /\/files\/([^/]+)\/encrypted-content$/u.exec(request.url)?.[1];
+    const object = containers.get(id);
+    if (!object || id !== current.manifestFileId && !current.accepted.some(file => file.id === id)) {
+      response.statusCode = 404;
+      return response.end();
+    }
+    if (id !== current.manifestFileId) downloaded.push(id);
+    return response.setHeader("x-trelio-workspace-id", workspaceId)
+      .setHeader("x-trelio-workspace-head", current.head)
+      .setHeader("x-trelio-ciphertext-sha256", object.digest).end(object.bytes);
+  });
+  await new Promise(resolve => server.listen(0, "127.0.0.1", resolve));
+  t.after(async () => { server.closeAllConnections(); await new Promise(resolve => server.close(resolve)); });
+  const origin = `http://127.0.0.1:${server.address().port}`;
+  const profile = { kind: "synthetic", resolveCompanyContextMirrorDirectory: () => path.join(root, "mirrors"),
+    requireToken: async () => "twb_synthetic",
+    prepareRequest: ({ origin, pathname, options }) => ({ url: new URL(pathname, origin), headers: options.headers, options: {} }) };
+  await withWorkspaceExecutionProfile(profile, async () => {
+    const sync = () => syncCompanyContextMirror({ origin, token: "twb_synthetic", companyEncryption });
+    const first = await sync();
+    assert.equal(first.mirror.workspaces[0].documents.length, 100);
+    assert.equal(downloaded.length, 100);
+    downloaded.length = 0;
+    const nextFiles = [updated, ...original.slice(1)];
+    await useHead("b", nextFiles);
+    const second = await sync();
+    assert.deepEqual(downloaded, [updated.id]);
+    assert.equal(second.mirror.workspaces[0].documents.length, 100);
+    assert.ok(second.mirror.workspaces[0].documents.every(file => file.workspaceHead === current.head));
+    await useHead("c", nextFiles.slice(0, -1));
+    downloaded.length = 0;
+    const deleted = await sync();
+    assert.equal(deleted.mirror.workspaces[0].documents.length, 99);
+    assert.equal(searchCompanyContextMirror(deleted.mirror, ["убираемый документ"]).results.length, 0);
+    assert.deepEqual(downloaded, []);
+    const allowed = nextFiles.slice(0, -1);
+    await useHead("d", allowed, [...allowed.slice(0, -1), original.at(-1)]);
+    await assert.rejects(sync(), { code: "WORKSPACE_FILE_MANIFEST_INVALID" });
+    canReadWorkspace = false;
+    await assert.rejects(sync(), { code: "ACCESS_DENIED" });
+    assert.deepEqual(downloaded, [], "an unauthorized or forged inventory causes no fallback file downloads");
+  });
+});
+
 for (const recovery of ["unchanged", "removed", "denied", "head_changed", "revoked_final", "gateway_restart"]) test(`cold mirror resumes completed Workspaces after cancellation [${recovery}]`, async (t) => {
   const root = await mkdtemp(path.join(os.tmpdir(), "trelio-workspace-resume-"));
   t.after(() => rm(root, { recursive: true, force: true }));

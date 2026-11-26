@@ -3986,6 +3986,7 @@ const buildWorkspaceRecord = async ({
   token,
   companyEncryption,
   workspace,
+  previousWorkspace,
   signal,
   searchCache,
   readSource,
@@ -4000,6 +4001,8 @@ const buildWorkspaceRecord = async ({
     companyEncryption,
     workspaceId: workspace.id,
     acceptedHead: workspace.acceptedHead,
+    previousWorkspace,
+    includeSearchFileInventory: token.startsWith("twb_") && currentWorkspaceExecutionProfile()?.kind !== "digital_assistant",
     signal,
     searchCache,
     readSource,
@@ -4181,6 +4184,7 @@ const buildMirror = async ({
           token,
           companyEncryption,
           workspace,
+          previousWorkspace: cached,
           signal,
           searchCache,
           readSource,
@@ -7604,7 +7608,7 @@ export const fetchMirrorResult = (mirror, rawResultId, knownInstructionLayerKeys
         ? {
             id: acceptedWorkspace.id,
             acceptedHead: acceptedWorkspace.acceptedHead,
-            files: acceptedWorkspace.documents ?? [],
+            files: (acceptedWorkspace.documents ?? []).map(withoutSearchFileReuseKey),
           }
         : null,
       ...(acceptedWorkspace
@@ -7685,13 +7689,15 @@ export const getWorkspaceFileFromMirror = (
       scopeKey: workspace.scopeKey,
       acceptedHead: workspace.acceptedHead,
     },
-    file,
+    file: withoutSearchFileReuseKey(file),
     materialize: {
       server: "trelio-remote-skills", tool: "continue_trelio_workspace_action",
       arguments: { schemaVersion: 1, operation: "download_file", parameters: { workspaceId, workspaceHead, filePath } },
     },
   };
 };
+
+const withoutSearchFileReuseKey = ({ sourceContentReuseKey: _sourceContentReuseKey, ...file }) => file;
 
 const normalizeProposalKind = (value) => {
   const kind = String(value || "").trim();

@@ -1170,6 +1170,9 @@ publication tooling также остаются вне этого публичн
   [контракт exact read](docs/agent-workspace-runtime.md#выбор-scope).
 - Файловый поиск использует generated `trelio-workspace-text-chunks.mjs` из backend
   pure module.
+  Reuse между heads требует современный native inventory текущей v2 projection,
+  неизменный ciphertext digest и ту же scope/epoch/device. Чанки переходят
+  в новую запись по свежему списку; private reuse key остаётся в зеркале.
   `search` и `search_agent_workspace_files` отклоняют четвёртую формулировку
   до подготовки зеркала по общей границе из generated context matching.
   В пределах поиска повторно используй скомпилированные формулировки для всех

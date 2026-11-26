@@ -15771,7 +15771,32 @@ export const readEncryptedWorkspaceSearchDocuments = async (input) => {
     sourceFileId: file.id, text: "", chunks: [],
     searchCoverage: { status: "unsupported", indexedBytes: 0, totalBytes: file.sizeBytes } }));
   const byId = new Map(files.map((file) => [file.id, file]));
-  const textDocuments = documents.filter((file) => file.contentType.startsWith("text/plain"));
+  const old = input.previousWorkspace;
+  const previousDocuments = new Map(old?.id === input.workspaceId
+    ? old.documents?.map(document => [document.sourceFileId, document]) ?? [] : []);
+  const { scope, device } = input.companyEncryption.runtime;
+  const { verifiedWorkspaceSearchCiphertextDigest } = await import("./trelio-workspace-files.mjs");
+  const textDocuments = documents.filter(document => {
+    if (!document.contentType.startsWith("text/plain")) return false;
+    const file = byId.get(document.sourceFileId);
+    const digest = verifiedWorkspaceSearchCiphertextDigest(file);
+    if (!digest) return true;
+    // Persist the proof only in the encrypted mirror. It binds content and
+    // index format to the same scope, recipient and file presentation; a
+    // matched entry contributes chunks to a NEW current-head record.
+    const key = crypto.createHash("sha256").update(JSON.stringify([1, scope.id, scope.epoch, device?.id,
+      document.workspaceId, file.id, digest, file.path, file.sizeBytes, file.contentType])).digest("hex");
+    document.sourceContentReuseKey = key;
+    const prior = previousDocuments.get(file.id);
+    if (prior?.sourceContentReuseKey !== key || prior.workspaceId !== input.workspaceId
+      || prior.workspaceHead !== old.acceptedHead || !Array.isArray(prior.chunks)
+      || !["complete", "unsupported"].includes(prior.searchCoverage?.status)
+      || prior.searchCoverage.totalBytes !== file.sizeBytes) return true;
+    document.chunks = prior.chunks;
+    document.searchCoverage = prior.searchCoverage;
+    input.onHydrationProgress?.();
+    return false;
+  });
   // Amortize per-file HTTP latency only for small, manifest-bounded inputs:
   // at most four files of <=1 MiB (plus fixed container framing) are active.
   // Large/unbounded text files retain the original ONE streaming worker and

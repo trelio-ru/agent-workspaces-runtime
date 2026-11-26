@@ -3244,6 +3244,15 @@ writes, повреждённые pointers и missing current сохраняют�
 keys, credentials и Workspace files не читаются; server state и ACL не меняются.
 Summary хранит только счётчики и время локально в `retention-v2-state.json`.
 Scratchpad файлов сохраняет свой отдельный лимит 512 MiB/семь дней.
+После смены accepted head файл из предыдущего полного зеркала переиспользуется
+только при наличии текущего `encryption.searchFileInventory` в ACL-checked
+overview и совпадении всей его текущей принятой v2 projection с расшифрованным
+manifest. Opaque ID, ciphertext digest, размер, локальные path/type и scope,
+epoch/device связывают кешированный текст с одним неизменившимся контейнером.
+Текст переносится в запись нового head; старые файлы вне текущего manifest
+не добавляются. Proof остаётся внутри защищённого локального зеркала.
+Старые записи без proof читаются штатно, final generation/recipient fence
+остаётся обязательным для выдачи.
 В schema 10 `sync.lock` использует тот же atomic nonce-протокол, что и
 retention. Возраст каталога и прошедшее время не снимают блокировку живого
 writer. Новый reader и sweep не исправляют locks старых layout. Сбой до атомарной публикации оставляет только
