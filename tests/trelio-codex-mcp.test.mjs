@@ -1,12 +1,13 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import http from "node:http";
+import { once } from "node:events";
 import { PassThrough } from "node:stream";
 import { gzipSync } from "node:zlib";
 import { createCodexMcpHandler, createDesktopOAuthMcpHandler, createHarnessConnection, handleLocalMcpMessage, handleToolCall, remoteMcpHttpRequest,
   RemoteMcpHostError, runCodexMcpStdioHost } from "../host-runtime/scripts/trelio-remote-mcp.mjs";
 import { buildTrelioBootstrapVerification } from "../host-runtime/scripts/trelio-installation-diagnostic.mjs";
-import { TrelioApiError } from "../host-runtime/scripts/trelio-workspace.mjs";
+import { MacosKeychainHelperError, TrelioApiError } from "../host-runtime/scripts/trelio-workspace.mjs";
 import { RemoteMcpOAuthError } from "../host-runtime/scripts/trelio-remote-mcp-oauth.mjs";
 import {
   cleanNativeRuntimeToolArguments, observeCodexMcpTurn, prepareCodexMcpToolArguments,
@@ -71,13 +72,19 @@ test("catalogue auth, integrity, vault and cancellation failures are not network
     const response = await handler(frame("tools/list"));
     if (["TRELIO_CODEX_AUTH_REQUIRED", "REMOTE_MCP_AUTH_REJECTED", "REMOTE_MCP_INSUFFICIENT_SCOPE"].includes(code)) {
       assert.deepEqual(response.result.tools.map(tool => tool.name), ["trelio_connect", "trelio_read"]);
-    } else assert.equal(response.error.message, code);
+    } else {
+      const expectedCode = code === "PRIVATE_VAULT_FAILED" ? "TRELIO_CODEX_MCP_FAILED" : code;
+      const expectedReason = code === "PRIVATE_VAULT_FAILED" ? "UNKNOWN" : code;
+      assert.equal(response.error.message, `${expectedCode} (stage=tools_list reason=${expectedReason})`);
+      assert.deepEqual(response.error.data, { stage: "tools_list", reason: expectedReason });
+    }
     assert.doesNotMatch(JSON.stringify(response), /private error prose/u);
   }
   for (const reserved of ["trelio_connect", "trelio_retry_catalog", "trelio_read"]) {
     const handler = createCodexMcpHandler({ connect: () => ({ listTools: async () => [{ name: reserved }] }) });
     await handler(frame("initialize"), { clientInfo });
-    assert.equal((await handler(frame("tools/list"))).error.message, "TRELIO_CODEX_CATALOG_CONFLICT");
+    assert.equal((await handler(frame("tools/list"))).error.message,
+      "TRELIO_CODEX_CATALOG_CONFLICT (stage=tools_list reason=TRELIO_CODEX_CATALOG_CONFLICT)");
   }
   const controller = new AbortController();
   const handler = createCodexMcpHandler({ connect: () => ({ listTools: async () => {
@@ -85,7 +92,60 @@ test("catalogue auth, integrity, vault and cancellation failures are not network
     throw controller.signal.reason;
   } }) });
   await handler(frame("initialize"), { clientInfo });
-  assert.equal((await handler(frame("tools/list"), { signal: controller.signal })).error.message, "REMOTE_MCP_TIMEOUT");
+  assert.equal((await handler(frame("tools/list"), { signal: controller.signal })).error.message,
+    "REMOTE_MCP_TIMEOUT (stage=tools_list reason=REMOTE_MCP_TIMEOUT)");
+});
+
+test("Codex stdio startup exposes the closed Keychain stage and reason in its loggable message", async () => {
+  const privateDetail = "fixture-token /private/credential.json";
+  const input = new PassThrough(), output = new PassThrough();
+  const connection = createHarnessConnection({ nativeClient: "codex",
+    httpJson: async () => ({ body: { issuer: "https://trelio.ru", scopes_supported: ["mcp:read"] } }),
+    vault: { read: async () => {
+      throw new MacosKeychainHelperError(privateDetail, "MACOS_KEYCHAIN_TIMEOUT", { cause: new Error(privateDetail) });
+    } },
+    httpRequest: () => assert.fail("credential failure must stop before sending credentials to MCP"),
+    connectOAuth: () => assert.fail("startup must not start OAuth"),
+  });
+  const host = runCodexMcpStdioHost({ profile: "remote", connect: () => connection, inputStream: input, outputStream: output,
+    environment: {}, preservePlugin: () => null, startupTrace() {}, diagnosticReporter: { record() {}, close() {} } });
+  const request = async (id, method, params) => {
+    const response = once(output, "data");
+    input.write(JSON.stringify({ jsonrpc: "2.0", id, method, params }) + "\n");
+    return JSON.parse(String((await response)[0]));
+  };
+  try {
+    assert.ok((await request(1, "initialize", { clientInfo })).result);
+    const reply = await request(2, "tools/list");
+    assert.deepEqual(reply.error, {
+      code: -32000, message: "TRELIO_CODEX_MCP_FAILED (stage=credential_store reason=MACOS_KEYCHAIN_TIMEOUT)",
+      data: { stage: "credential_store", reason: "MACOS_KEYCHAIN_TIMEOUT" },
+    });
+    assert.doesNotMatch(JSON.stringify(reply), /fixture-token|credential\.json/u);
+  } finally {
+    input.end();
+    await host;
+  }
+});
+
+test("Codex startup projects unknown stages and reasons without changing other desktop clients", async () => {
+  const privateDetail = "PRIVATE_ERROR_FROM_UPSTREAM";
+  const options = { connect: () => ({
+    listTools: async (_signal, { onStage }) => {
+      onStage(privateDetail);
+      throw new RemoteMcpHostError(privateDetail, "fixture external diagnostic");
+    },
+  }) };
+  const codex = createCodexMcpHandler(options);
+  await codex(frame("initialize"), { clientInfo });
+  const reply = await codex(frame("tools/list"));
+  assert.deepEqual(reply.error, {
+    code: -32000, message: "TRELIO_CODEX_MCP_FAILED (stage=tools_list reason=UNKNOWN)",
+    data: { stage: "tools_list", reason: "UNKNOWN" },
+  });
+  const other = createDesktopOAuthMcpHandler("claude-code", options);
+  await other(frame("initialize"), { clientInfo });
+  assert.deepEqual((await other(frame("tools/list"))).error, { code: -32000, message: privateDetail });
 });
 
 test("catalogue startup is bounded and late readers cannot restore stale dispatch", async t => {

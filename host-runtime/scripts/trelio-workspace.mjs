@@ -2061,6 +2061,16 @@ const compileMacosBridgeKeychainHelper = async (sourceFile, outputFile, cwd) => 
   }
 };
 
+// These categories originate here, before the private helper result is read.
+// The Codex startup handler can report the category without exposing native
+// error text, paths, child output or a credential from the private pipe.
+export class MacosKeychainHelperError extends Error {
+  constructor(message, diagnosticReason, options) {
+    super(message, options);
+    this.diagnosticReason = diagnosticReason;
+  }
+}
+
 const resolveMacosBridgeKeychainHelper = async () => {
   if (!USE_MACOS_KEYCHAIN) {
     throw new Error("macOS Keychain недоступен для текущего bridge process.");
@@ -2122,7 +2132,10 @@ const resolveMacosBridgeKeychainHelper = async () => {
     }
   }
   if (!ownsLock) {
-    throw new Error("Другой bridge process не завершил подготовку macOS Keychain helper.");
+    throw new MacosKeychainHelperError(
+      "Другой bridge process не завершил подготовку macOS Keychain helper.",
+      "MACOS_KEYCHAIN_PREPARATION_TIMEOUT",
+    );
   }
 
   const temporaryDirectory = path.join(
@@ -2157,7 +2170,10 @@ const resolveMacosBridgeKeychainHelper = async () => {
 };
 
 const executeMacosBridgeKeychainHelper = async (requestPayload) => {
-  const executable = await resolveMacosBridgeKeychainHelper();
+  const executable = await resolveMacosBridgeKeychainHelper().catch(error => {
+    if (error instanceof MacosKeychainHelperError) throw error;
+    throw new MacosKeychainHelperError(error.message, "MACOS_KEYCHAIN_PREPARATION_FAILED", { cause: error });
+  });
   return new Promise((resolve, reject) => {
     const child = spawn(executable, [], {
       shell: false,
@@ -2189,14 +2205,17 @@ const executeMacosBridgeKeychainHelper = async (requestPayload) => {
       child.kill();
       finish(() => {
         wipeChunks();
-        reject(new Error("macOS Keychain helper превысил допустимое время."));
+        reject(new MacosKeychainHelperError(
+          "macOS Keychain helper превысил допустимое время.", "MACOS_KEYCHAIN_TIMEOUT",
+        ));
       });
     }, 10_000);
 
     child.once("error", (error) => finish(() => {
       wipeChunks();
-      reject(new Error(
+      reject(new MacosKeychainHelperError(
         "Не удалось запустить системный macOS Keychain helper.",
+        "MACOS_KEYCHAIN_SPAWN_FAILED",
         { cause: error },
       ));
     }));
@@ -2206,7 +2225,9 @@ const executeMacosBridgeKeychainHelper = async (requestPayload) => {
         child.kill();
         finish(() => {
           wipeChunks();
-          reject(new Error("macOS Keychain helper вернул слишком большой ответ."));
+          reject(new MacosKeychainHelperError(
+            "macOS Keychain helper вернул слишком большой ответ.", "MACOS_KEYCHAIN_RESPONSE_INVALID",
+          ));
         });
         return;
       }
@@ -2215,31 +2236,36 @@ const executeMacosBridgeKeychainHelper = async (requestPayload) => {
     resultStream?.once("error", (error) => finish(() => {
       child.kill();
       wipeChunks();
-      reject(new Error(
+      reject(new MacosKeychainHelperError(
         "Не удалось прочитать ответ macOS Keychain helper.",
+        "MACOS_KEYCHAIN_IO_FAILED",
         { cause: error },
       ));
     }));
     child.once("close", (code) => finish(() => {
       if (code !== 0) {
         wipeChunks();
-        reject(new Error(
+        reject(new MacosKeychainHelperError(
           `macOS Keychain отклонил локальную операцию bridge device-session (код ${code}).`,
+          "MACOS_KEYCHAIN_OPERATION_FAILED",
         ));
         return;
       }
       try {
         resolve(JSON.parse(Buffer.concat(chunks).toString("utf8")));
       } catch (error) {
-        reject(new Error("macOS Keychain helper вернул некорректный ответ.", { cause: error }));
+        reject(new MacosKeychainHelperError(
+          "macOS Keychain helper вернул некорректный ответ.", "MACOS_KEYCHAIN_RESPONSE_INVALID", { cause: error },
+        ));
       } finally {
         wipeChunks();
       }
     }));
     child.stdin.once("error", (error) => finish(() => {
       wipeChunks();
-      reject(new Error(
+      reject(new MacosKeychainHelperError(
         "Не удалось передать запрос macOS Keychain helper.",
+        "MACOS_KEYCHAIN_IO_FAILED",
         { cause: error },
       ));
     }));

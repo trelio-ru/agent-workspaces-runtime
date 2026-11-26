@@ -76,6 +76,7 @@ import {
   AGENT_SKILL_MAX_PACKAGE_BYTES,
   AGENT_SKILL_RUNTIME_HOST_MINIMUM_VERSION,
   BridgeTransportError,
+  MacosKeychainHelperError,
   TrelioApiError,
   diagnoseLocalPrerequisites,
   ensureBridgeCompatibility,
@@ -8051,8 +8052,8 @@ export const { observeHarnessRuntime, harnessToolName, projectHarnessMcpResult,
       async readResource(uri, signal) {
         return (await rpc("resources/read", { uri }, signal)).result;
       },
-      async listResources(signal) {
-        return (await rpc("resources/list", {}, signal)).result;
+      async listResources(signal, onStage) {
+        return (await rpc("resources/list", {}, signal, onStage)).result;
       },
       instructions: () => session?.instructions ?? "",
     };
@@ -8822,6 +8823,38 @@ const codexCatalogTransportFailure = error => {
   return null;
 };
 
+const codexStartupMethods = new Map([
+  ["initialize", "initialize"], ["tools/list", "tools_list"], ["resources/list", "resources_list"],
+]);
+const codexStartupStages = new Set([
+  "oauth_metadata", "credential_store", "session_init_wait", "mcp_initialize", "mcp_initialized",
+  "catalog_headers", "catalog_first_byte", "catalog_body", "catalog_decode", "catalog_validation",
+]);
+const codexStartupCodes = new Set([
+  "TRELIO_CODEX_CLIENT_REQUIRED", "TRELIO_CODEX_CATALOG_CONFLICT", "TRELIO_HARNESS_CATALOG_INVALID",
+  "TRELIO_HARNESS_OAUTH_METADATA_INVALID", "TRELIO_HARNESS_PROTOCOL_INVALID", "REMOTE_MCP_PROTOCOL_INVALID",
+  "REMOTE_MCP_ENDPOINT_BLOCKED", "REMOTE_MCP_HOST_BLOCKED", "REMOTE_MCP_SSRF_BLOCKED",
+  "REMOTE_MCP_SESSION_NOT_FOUND", "REMOTE_MCP_JSON_RPC_ERROR", "ERR_TLS_CERT_ALTNAME_INVALID", "CERT_HAS_EXPIRED",
+  "UNABLE_TO_VERIFY_LEAF_SIGNATURE", "SELF_SIGNED_CERT_IN_CHAIN", "DEPTH_ZERO_SELF_SIGNED_CERT",
+]);
+const codexKeychainStartupReasons = new Set([
+  "MACOS_KEYCHAIN_PREPARATION_TIMEOUT", "MACOS_KEYCHAIN_PREPARATION_FAILED", "MACOS_KEYCHAIN_TIMEOUT",
+  "MACOS_KEYCHAIN_SPAWN_FAILED", "MACOS_KEYCHAIN_OPERATION_FAILED",
+  "MACOS_KEYCHAIN_IO_FAILED", "MACOS_KEYCHAIN_RESPONSE_INVALID",
+]);
+
+const codexStartupError = (error, stage) => {
+  // Codex includes the JSON-RPC message in its startup log. The error data
+  // mirrors the two closed fields for clients that retain structured errors.
+  // An upstream or system exception can supply neither free text nor a path.
+  const knownCode = codexStartupCodes.has(error?.code) ? error.code : codexCatalogTransportFailure(error)?.reason;
+  const code = knownCode ?? "TRELIO_CODEX_MCP_FAILED";
+  const keychainReason = error instanceof MacosKeychainHelperError && codexKeychainStartupReasons.has(error.diagnosticReason)
+    ? error.diagnosticReason : null;
+  const reason = keychainReason ?? knownCode ?? "UNKNOWN";
+  return { code: -32000, message: `${code} (stage=${stage} reason=${reason})`, data: { stage, reason } };
+};
+
 class CodexCatalogUnavailableError extends RemoteMcpHostError {
   constructor(failure, catalogTiming) {
     super("TRELIO_CODEX_CATALOG_UNAVAILABLE", failure.message);
@@ -8879,7 +8912,7 @@ export const createDesktopOAuthMcpHandler = (nativeClient, {
   let toolsByName = null;
   let catalogGeneration = 0;
   let catalogListed = false;
-  const catalog = async (signal, timeoutMs = CODEX_CATALOG_STARTUP_TIMEOUT_MS) => {
+  const catalog = async (signal, timeoutMs = CODEX_CATALOG_STARTUP_TIMEOUT_MS, observeStage) => {
     const generation = ++catalogGeneration;
     const startedAt = performance.now();
     let stageStartedAt = startedAt;
@@ -8889,6 +8922,7 @@ export const createDesktopOAuthMcpHandler = (nativeClient, {
     const onStage = name => {
       stage = name;
       stageStartedAt = performance.now();
+      observeStage?.(name);
     };
     const timing = () => {
       const now = performance.now();
@@ -8929,6 +8963,12 @@ export const createDesktopOAuthMcpHandler = (nativeClient, {
   };
   const handler = async (message, { signal, clientInfo, clientCapabilities, notifyClient, requestClient, runtimeUpgradeRecovery, recordDiagnostic } = {}) => {
     if (message?.jsonrpc !== "2.0" || message.id === null || message.id === undefined) return null;
+    // Keep this stage with the request. Concurrent list/refresh operations
+    // cannot overwrite the stage reported to Codex by another failed frame.
+    let startupStage = isCodex ? codexStartupMethods.get(message.method) : undefined;
+    const observeStartupStage = startupStage ? name => {
+      if (codexStartupStages.has(name)) startupStage = name;
+    } : undefined;
     let failureCode;
     let diagnosticName = message.params?.name;
     let diagnosticArguments = message.params?.arguments;
@@ -8968,7 +9008,7 @@ export const createDesktopOAuthMcpHandler = (nativeClient, {
         // Leave most of the startup window to the signed loader and catalog.
         // An unavailable instruction bootstrap cannot hide the login tool.
         const bootstrapSignal = AbortSignal.any([AbortSignal.timeout(3_000), ...(signal ? [signal] : [])]);
-        await connection.initialize?.(bootstrapSignal).catch(() => undefined);
+        await connection.initialize?.(bootstrapSignal, observeStartupStage).catch(() => undefined);
         return reply({ protocolVersion: message.params?.protocolVersion || REMOTE_MCP_PROTOCOL_VERSION,
           serverInfo: { name: "Trelio", version: HOST_RUNTIME_VERSION },
           capabilities: { tools: { listChanged: true }, resources: {} },
@@ -8979,7 +9019,9 @@ export const createDesktopOAuthMcpHandler = (nativeClient, {
       if (message.method === "tools/list") {
         const listedConnection = connection;
         try {
-          const { tools } = await catalog(signal, catalogListed ? CODEX_CATALOG_RECOVERY_TIMEOUT_MS : CODEX_CATALOG_STARTUP_TIMEOUT_MS);
+          const { tools } = await catalog(
+            signal, catalogListed ? CODEX_CATALOG_RECOVERY_TIMEOUT_MS : CODEX_CATALOG_STARTUP_TIMEOUT_MS, observeStartupStage,
+          );
           return reply({ tools });
         }
         catch (error) {
@@ -9000,7 +9042,7 @@ export const createDesktopOAuthMcpHandler = (nativeClient, {
         }
       }
       if (message.method === "resources/list") {
-        try { return reply(await connection.listResources(signal)); }
+        try { return reply(await connection.listResources(signal, observeStartupStage)); }
         catch (error) { if (authFailure(error)) return reply({ resources: [] }); throw error; }
       }
       if (message.method === "resources/read" && typeof message.params?.uri === "string") {
@@ -9147,6 +9189,7 @@ export const createDesktopOAuthMcpHandler = (nativeClient, {
       }, callSignal), { signal, ...nativeTrelioToolBudget(schemaOnly ? undefined : name) });
       return result === null ? null : reply(result);
     } catch (error) {
+      if (startupStage) return { jsonrpc: "2.0", id: message.id, error: codexStartupError(error, startupStage) };
       // Capture the typed host outcome before a recovery branch deliberately
       // removes structuredContent to honor an upstream success-only schema.
       // The reporter still projects this code through its closed vocabulary;
