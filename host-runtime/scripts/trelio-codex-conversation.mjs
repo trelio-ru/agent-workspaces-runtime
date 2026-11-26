@@ -203,10 +203,9 @@ const resolveCodexExecutable = async (environment,{platform=process.platform,fil
 };
 
 /**
- * Read only one verified thread through Codex App Server. Project setup can
- * also read the exact project ID returned by that thread. Both projections
- * discard the other metadata, omit turns and never resume a chat. Suppress
- * stderr because even a local CLI diagnostic can contain private content.
+ * Read from the local Codex App Server without loading turns or resuming a
+ * chat. The project catalog is used only by the private setup App. Discard
+ * unrelated metadata and suppress diagnostics that could contain local paths.
  */
 const readCodexConversationMetadata = async (conversationId, projection, {
   environment = process.env,
@@ -215,7 +214,10 @@ const readCodexConversationMetadata = async (conversationId, projection, {
   signal,
   timeoutMs = 3000,
 } = {}) => {
-  if (!UUID.test(String(conversationId)) || signal?.aborted) return null;
+  const list = projection === "project-list";
+  const exactProject = projection === "project-by-id";
+  if (signal?.aborted || (!list && !(exactProject
+    ? safeCodexProjectId(conversationId) : UUID.test(String(conversationId))))) return null;
   const deadline=AbortSignal.timeout(timeoutMs);signal=signal?AbortSignal.any([signal,deadline]):deadline;
   const started=performance.now();
   const resolvedExecutable = executable || await resolveCodexExecutable(environment,{signal});
@@ -229,6 +231,8 @@ const readCodexConversationMetadata = async (conversationId, projection, {
     let bytes = 0;
     let initialized = false;
     let projectSelection = null;
+    let listRequestId = 2;
+    const projects = [];
     const finish = (value = null) => {
       if (done) return;
       done = true;
@@ -271,7 +275,22 @@ const readCodexConversationMetadata = async (conversationId, projection, {
             if (message.error || !message.result) return finish();
             initialized = true;
             send({ method: "initialized" });
-            send({ id: 2, method: "thread/read", params: { threadId: conversationId, includeTurns: false } });
+            if (list) send({ id: listRequestId, method: "project/list", params: { limit: 100 } });
+            else if (exactProject) send({ id: 2, method: "project/read", params: { projectId: conversationId } });
+            else send({ id: 2, method: "thread/read", params: { threadId: conversationId, includeTurns: false } });
+          } else if (initialized && list && message.id === listRequestId) {
+            const page = message.result?.data;
+            const cursor = message.result?.nextCursor;
+            if (message.error || !Array.isArray(page) || page.length > 100) return finish();
+            projects.push(...page.map(project => projectFolderEntry(project)).filter(Boolean));
+            if (cursor == null) return finish(projects);
+            // A partial catalog cannot prove a folder is absent. Bound the
+            // read and require the user to open the intended project if needed.
+            if (listRequestId >= 4 || typeof cursor !== "string" || !cursor || cursor.length > 4096) return finish();
+            send({ id: ++listRequestId, method: "project/list", params: { limit: 100, cursor } });
+          } else if (initialized && exactProject && message.id === 2) {
+            const project = message.result?.project;
+            return finish(!message.error && project?.id === conversationId ? projectFolderEntry(project) : null);
           } else if (message.id === 2 && initialized && !projectSelection) {
             const thread = message.result?.thread;
             if (message.error || thread?.id !== conversationId) return finish();
@@ -299,6 +318,10 @@ export const readCodexConversationTitle = (conversationId, options) =>
 
 export const readCodexProjectFolder = (conversationId, options) =>
   readCodexConversationMetadata(normalizeCodexNavigationThreadId(conversationId), "project", options);
+
+export const listCodexProjectFolders = options => readCodexConversationMetadata(null, "project-list", options);
+
+const readCodexProjectById = (projectId, options) => readCodexConversationMetadata(projectId, "project-by-id", options);
 
 /**
  * Every attempt starts from live private Run metadata, never CODEX_THREAD_ID.
@@ -594,9 +617,19 @@ const safeConnectionName = value => typeof value === "string" && value.trim().le
 const safeCodexProjectPath = value => safeFolderPath(value)
   && (process.platform !== "win32" || /^[A-Za-z]:[\\/]/u.test(value));
 
+const safeCodexProjectId = value => typeof value === "string" && value.length > 0
+  && value.length <= 256 && !/[\u0000-\u001f\u007f]/u.test(value);
+
+const projectFolderEntry = project => {
+  if (!safeCodexProjectId(project?.id) || !Array.isArray(project.roots) || project.roots.length === 0
+    || !project.roots.every(root => safeCodexProjectPath(root?.path))) return null;
+  const folderPaths = project.roots.map(root => path.resolve(root.path));
+  return { projectId: project.id, folderPaths,
+    name: safeConnectionName(project.name) ? project.name.trim() : path.basename(folderPaths[0]) };
+};
+
 const codexThreadProjectSelection = ({ projectId, cwd, ephemeral, environments }) => {
-  if (typeof projectId !== "string" || !projectId || projectId.length > 256
-    || /[\u0000-\u001f\u007f]/u.test(projectId) || ephemeral !== false || !safeCodexProjectPath(cwd)) return null;
+  if (!safeCodexProjectId(projectId) || ephemeral !== false || !safeCodexProjectPath(cwd)) return null;
   // A cold read may omit environments. When the server exposes a current
   // environment, refuse remote, multiple or internally inconsistent results.
   if (environments != null) {
@@ -853,15 +886,20 @@ export const openCodexConnectionWizard = async (origin, raw, dependencies = {}) 
     signal: dependencies.signal,
   }) : null;
   dependencies.signal?.throwIfAborted();
+  // A projectless Mac can start in a home folder without prompting for the
+  // separate macOS Documents permission. Previously saved paths still win.
+  const suggestedRoot = threadId && process.platform === "darwin"
+    ? path.join(homedir(), "Trelio") : path.join(homedir(), "Documents", "Trelio");
   const state = { stage: "folder",
-    folderPath: project?.folderPath ?? previous.folderPath ?? path.join(homedir(), "Documents", "Trelio", context.company.slug),
+    folderPath: project?.folderPath ?? previous.folderPath ?? path.join(suggestedRoot, context.company.slug),
     displayName: previous.displayName ?? `Trelio · ${context.company.name}`.slice(0, 199).replace(/[\uD800-\uDBFF]$/u, ""),
     createFolder: project ? false : previous.createFolder ?? true };
+  if (threadId) state.selection = project ? "current" : null;
   const now = Date.now();
   for (const [key, value] of wizardCapabilities) if (value.expiresAt <= now) wizardCapabilities.delete(key);
   if (wizardCapabilities.size >= 32) throw wizardError("CODEX_CONNECTION_LIMIT");
   const capabilityToken = crypto.randomBytes(32).toString("base64url");
-  const capability = { origin, parameters: raw.parameters, company: context.company, memberId: context.memberId, stateFile, state,
+  const capability = { origin, parameters: raw.parameters, company: context.company, memberId: context.memberId, stateFile, state, threadId,
     project: project ? { ...project, threadId } : null, busyKey: key, expiresAt: now + WIZARD_LIFETIME_MS,
     ...(dependencies.trackPresentation ? {
       presentation: { id: crypto.randomUUID(), threadId, state: "pending", settled: new AbortController() },
@@ -890,6 +928,69 @@ const prepareWizardDirectory = async (folderPath, createFolder, filesystem, sign
   }
   if (await filesystem.realpath(folderPath) !== folderPath) throw wizardError("CODEX_CONNECTION_FOLDER_UNSAFE");
 };
+
+/** macOS delivers the folder to the installed Desktop app. LaunchServices is
+ * only a delivery acknowledgement. Codex owns the trust dialog and the new
+ * project is confirmed separately by reading its catalog. */
+export const openCodexConnectionProject = async (folderPath, { signal, filesystem = fs } = {}) => {
+  const apps = ["/Applications/ChatGPT.app", "/Applications/Codex.app"];
+  const available = (await Promise.all(apps.map(async app => (
+    await filesystem.access(path.join(app, "Contents", "MacOS")).then(() => true, () => false) ? app : null
+  )))).filter(Boolean);
+  const executable = available.length > 1 ? await resolveCodexExecutable(process.env, { signal }) : null;
+  const app = available.length === 1 ? available[0] : available.find(candidate => executable?.startsWith(`${candidate}/Contents/`));
+  if (!app) throw wizardError("CODEX_CONNECTION_PROJECT_OPEN_UNAVAILABLE");
+  const script = `ObjC.import("AppKit");
+const bytes = $.NSFileHandle.fileHandleWithStandardInput.readDataToEndOfFile;
+const input = JSON.parse(ObjC.unwrap($.NSString.alloc.initWithDataEncoding(bytes, $.NSUTF8StringEncoding)));
+const folder = $.NSURL.fileURLWithPath(input.folderPath);
+const app = $.NSURL.fileURLWithPath(input.app);
+const configuration = $.NSWorkspaceOpenConfiguration.configuration;
+$.NSWorkspace.sharedWorkspace.openURLsWithApplicationAtURLConfigurationCompletionHandler($.NSArray.arrayWithObject(folder), app, configuration, $());
+delay(1);`;
+  const bound = AbortSignal.timeout(5_000);
+  signal = signal ? AbortSignal.any([signal, bound]) : bound;
+  signal.throwIfAborted();
+  await new Promise((resolve, reject) => {
+    // Pass the approved local path by a private pipe. It must never appear
+    // in argv, the environment or AppleScript diagnostics.
+    const child = spawn("/usr/bin/osascript", ["-l", "JavaScript", "-e", script], {
+      shell: false, signal, killSignal: "SIGKILL", stdio: ["pipe", "ignore", "ignore"], env: titleEnvironment(process.env),
+    });
+    let failed = false;
+    child.on("error", () => { failed = true });
+    child.stdin.on("error", () => { failed = true; child.kill("SIGKILL") });
+    child.on("close", code => {
+      if (failed || code !== 0 || signal.aborted) reject(wizardError("CODEX_CONNECTION_PROJECT_OPEN_UNAVAILABLE"));
+      else resolve();
+    });
+    child.stdin.end(JSON.stringify({ app, folderPath }));
+  });
+};
+
+const catalogFolderMatch = (projects, folderPath) =>
+  projects?.some(project => project.folderPaths.some(candidate => path.relative(candidate, folderPath) === "")) === true;
+
+async function confirmCodexConnectionProject(cap, dependencies, filesystem) {
+  const signal = dependencies.signal;
+  const read = () => (dependencies.listProjectFolders ?? listCodexProjectFolders)({ signal });
+  const folderPath = cap.state.folderPath;
+  let projects = await read();
+  if (!projects) throw wizardError("CODEX_CONNECTION_PROJECT_LIST_UNAVAILABLE");
+  if (catalogFolderMatch(projects, folderPath)) return true;
+
+  await (dependencies.openProject ?? openCodexConnectionProject)(folderPath, { signal, filesystem });
+  const trustDeadline = performance.now() + (dependencies.projectTrustWaitMs ?? 25_000);
+  // App navigation or a cancelled dialog can interrupt this wait. The
+  // selected folder is already stored as a draft, so a later Connect can
+  // verify the same path without re-opening a project that is already there.
+  while (performance.now() < trustDeadline) {
+    await delay(750, undefined, { signal });
+    projects = await read();
+    if (catalogFolderMatch(projects, folderPath)) return true;
+  }
+  return false;
+}
 
 const verifyWizardFolderReadiness = async (folderPath, company, { filesystem, onboarding, signal }) => {
   const folderModule = onboarding ?? await import("./trelio-folder-onboarding.mjs");
@@ -926,8 +1027,11 @@ const verifyWizardFolderReadiness = async (folderPath, company, { filesystem, on
 };
 
 export const handleCodexConnectionAction = async (origin, input, dependencies = {}) => {
-  if (!object(input) || Object.keys(input).some(key => !["capabilityToken", "action", "settings"].includes(key))
-    || !["state", "pick", "save", "connect", "confirm_browser", "presented"].includes(input.action)) throw wizardError("CODEX_CONNECTION_INVALID_INPUT");
+  if (!object(input) || Object.keys(input).some(key => !["capabilityToken", "action", "settings", "projectId"].includes(key))
+    || !["state", "pick", "save", "connect", "confirm_browser", "presented", "list_projects", "select_project"].includes(input.action)
+    || (input.action === "select_project" ? !safeCodexProjectId(input.projectId) : Object.hasOwn(input, "projectId"))) {
+    throw wizardError("CODEX_CONNECTION_INVALID_INPUT");
+  }
   const cap = wizardCapabilities.get(input.capabilityToken);
   if (!cap || cap.origin !== origin || cap.expiresAt <= Date.now()) throw new CodexConnectionExpiredError();
   if (input.action === "presented") {
@@ -953,26 +1057,57 @@ export const handleCodexConnectionAction = async (origin, input, dependencies = 
     }
     dependencies.signal?.throwIfAborted();
     const { filesystem } = await wizardDependencies(dependencies);
+    if (input.action === "list_projects") {
+      if (input.settings !== undefined) throw wizardError("CODEX_CONNECTION_INVALID_INPUT");
+      const projects = await (dependencies.listProjectFolders ?? listCodexProjectFolders)({ signal: dependencies.signal });
+      if (!projects) throw wizardError("CODEX_CONNECTION_PROJECT_LIST_UNAVAILABLE");
+      // IDs and paths are local App data. Pin the exact single-root choices to
+      // this card, and validate a clicked choice by native ID before using it.
+      cap.projectChoices = projects.filter(project => project.folderPaths.length === 1)
+        .map(({ projectId, name, folderPaths: [folderPath] }) => ({ projectId, name, folderPath }));
+      return wizardResult(input.capabilityToken, cap, { ...cap.state, projectChoices: cap.projectChoices });
+    }
+    if (input.action === "select_project") {
+      const choice = cap.projectChoices?.find(project => project.projectId === input.projectId);
+      if (input.settings !== undefined || !choice) throw wizardError("CODEX_CONNECTION_INVALID_INPUT");
+      const verified = await (dependencies.readProjectById ?? readCodexProjectById)(choice.projectId, { signal: dependencies.signal });
+      if (verified?.projectId !== choice.projectId || verified.folderPaths.length !== 1
+        || verified.folderPaths[0] !== choice.folderPath) throw wizardError("CODEX_CONNECTION_PROJECT_FOLDER_CHANGED");
+      cap.project = choice;
+      cap.state = { ...cap.state, stage: "folder", selection: "project", folderPath: choice.folderPath, createFolder: false };
+    }
     if (input.settings !== undefined) {
       if (!["save", "pick", "connect"].includes(input.action) || !object(input.settings)
-        || Object.keys(input.settings).some(key => !["folderPath", "displayName", "createFolder"].includes(key))
+        || Object.keys(input.settings).some(key => !["folderPath", "displayName", "createFolder", "selection"].includes(key))
         || !safeFolderPath(input.settings.folderPath) || !safeConnectionName(input.settings.displayName)
+        || (input.settings.selection !== undefined && input.settings.selection !== "folder")
         || typeof input.settings.createFolder !== "boolean") throw wizardError("CODEX_CONNECTION_INVALID_INPUT");
-      cap.state = { stage: "folder", folderPath: path.resolve(input.settings.folderPath),
-        displayName: input.settings.displayName.trim(), createFolder: input.settings.createFolder };
-      // An explicit different App path is a manual selection. A submitted
-      // form with the same path still uses the native project's freshness check.
-      if (cap.project && cap.state.folderPath !== cap.project.folderPath) cap.project = null;
+      const folderPath = path.resolve(input.settings.folderPath);
+      const explicitFolder = input.settings.selection === "folder" && input.action !== "pick";
+      if (cap.state.selection !== undefined && folderPath !== cap.state.folderPath && !explicitFolder && input.action !== "pick") {
+        throw wizardError("CODEX_CONNECTION_SELECTION_REQUIRED");
+      }
+      // Editing the name for the same root does not loosen its original
+      // project fence. An explicitly entered different path has its own check.
+      if (cap.project && folderPath !== cap.project.folderPath && input.action !== "pick") cap.project = null;
+      cap.state = { ...cap.state, stage: "folder",
+        ...(input.action === "pick" && cap.project ? {} : { folderPath, createFolder: input.settings.createFolder }),
+        displayName: input.settings.displayName.trim() };
+      if (explicitFolder && !cap.project) cap.state.selection = "folder";
     }
     if (input.action === "connect" && cap.project) {
-      const current = await (dependencies.readProjectFolder ?? readCodexProjectFolder)(cap.project.threadId, {
-        signal: dependencies.signal,
-      });
+      const options = { signal: dependencies.signal };
+      const latest = cap.project.threadId
+        ? await (dependencies.readProjectFolder ?? readCodexProjectFolder)(cap.project.threadId, options)
+        : await (dependencies.readProjectById ?? readCodexProjectById)(cap.project.projectId, options);
+      const currentPath = cap.project.threadId ? latest?.folderPath
+        : latest?.folderPaths?.length === 1 ? latest.folderPaths[0] : null;
       dependencies.signal?.throwIfAborted();
-      if (current?.projectId !== cap.project.projectId || current.folderPath !== cap.project.folderPath) {
+      if (latest?.projectId !== cap.project.projectId || currentPath !== cap.project.folderPath) {
         throw wizardError("CODEX_CONNECTION_PROJECT_FOLDER_CHANGED");
       }
     }
+    if (input.action === "connect" && cap.state.selection === null) throw wizardError("CODEX_CONNECTION_SELECTION_REQUIRED");
     // Persist the user's typed choice before opening a native modal. A cancel,
     // unavailable GUI or interrupted modal must not lose the edited name/path.
     if (input.settings !== undefined) await bridge.writePrivateJsonFile(cap.stateFile, {
@@ -982,8 +1117,9 @@ export const handleCodexConnectionAction = async (origin, input, dependencies = 
       const selected = await (dependencies.chooseFolder ?? chooseCodexConnectionFolder)({ signal: dependencies.signal });
       if (selected) {
         if (!safeFolderPath(selected)) throw wizardError("CODEX_CONNECTION_INVALID_INPUT");
-        cap.state = { ...cap.state, stage: "folder", folderPath: selected, createFolder: false };
         if (cap.project && selected !== cap.project.folderPath) cap.project = null;
+        cap.state = { ...cap.state, stage: "folder", folderPath: selected, createFolder: false,
+          ...(!cap.project ? { selection: "folder" } : {}) };
       }
     }
     if (input.action === "pick") await bridge.writePrivateJsonFile(cap.stateFile, {
@@ -1005,7 +1141,26 @@ export const handleCodexConnectionAction = async (origin, input, dependencies = 
       const plan = await folderModule.prepareTrelioFolderOnboarding({ folderPath: cap.state.folderPath, company: cap.company });
       if (!plan.plan) throw wizardError("CODEX_CONNECTION_FOLDER_REVIEW_REQUIRED");
       dependencies.signal?.throwIfAborted();
-      if (plan.plan.apply) await folderModule.applyTrelioFolderOnboarding(plan.plan.apply.arguments.parameters);
+      let approvedPlan = plan.plan;
+      if (cap.threadId && !cap.project && cap.state.selection === "folder" && (dependencies.platform ?? process.platform) === "darwin") {
+        if (!await confirmCodexConnectionProject(cap, dependencies, filesystem)) {
+          cap.state.stage = "project_pending";
+          return wizardResult(input.capabilityToken, cap, cap.state);
+        }
+        // The user can switch OAuth accounts or the Desktop can initialize
+        // service Git while the native dialog is open. Renew the same scope and
+        // compute the file CAS plan again under the new filesystem state.
+        const live = await liveWizardContext(origin, cap.parameters, dependencies, dependencies.signal);
+        if (wizardBindingKey(origin, live.token, live.context) !== cap.busyKey) {
+          throw wizardError("CODEX_CONNECTION_SCOPE_CHANGED");
+        }
+        await prepareWizardDirectory(cap.state.folderPath, false, filesystem, dependencies.signal);
+        const refreshed = await folderModule.prepareTrelioFolderOnboarding({ folderPath: cap.state.folderPath, company: cap.company });
+        if (!refreshed.plan) throw wizardError("CODEX_CONNECTION_FOLDER_REVIEW_REQUIRED");
+        approvedPlan = refreshed.plan;
+      }
+      dependencies.signal?.throwIfAborted();
+      if (approvedPlan.apply) await folderModule.applyTrelioFolderOnboarding(approvedPlan.apply.arguments.parameters);
       const folder = await inspectCodexLaunchFolder(cap.state.folderPath, { bridge, filesystem });
       if (folder?.state !== "bound" || folder.folderPath !== cap.state.folderPath
         || folder.company.slug !== cap.company.slug || folder.project) {
@@ -1089,16 +1244,20 @@ export const codexConnectionAppResource = () => ({
     "openai/widgetDescription": "Мастер подключения Codex: рабочая папка и проверенная регистрация в Trelio." },
   text: String.raw`<!doctype html><html lang="ru"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Подключение Codex</title>
 <style>
-:root{color-scheme:light dark;font:15px/1.5 Arial,sans-serif;color:var(--color-text-primary,light-dark(#20242b,#f1f3f6));background:var(--color-background-primary,light-dark(#fff,#181b20))}*{box-sizing:border-box}body{margin:0;padding:20px}main{max-width:640px;margin:auto}h1{font-size:22px;line-height:1.3;margin:0 0 8px}h2{font-size:17px;margin:0 0 12px}p{margin:0 0 16px}.muted{color:var(--color-text-secondary,light-dark(#555e6e,#b7c0cf));font-size:14px}.surface{border:1px solid var(--color-border-primary,light-dark(#dfe3e9,#3c4350));border-radius:12px;padding:18px;margin:16px 0}.row{display:flex;align-items:center;justify-content:space-between;gap:12px}.path{overflow-wrap:anywhere;font-family:ui-monospace,monospace;font-size:13px}.check{margin:8px 0}.check span{margin-right:8px}button,input{font:inherit}button{min-height:44px;padding:10px 16px;border:1px solid var(--color-border-primary,light-dark(#ccd2dc,#515b6e));border-radius:8px;cursor:pointer;color:inherit;background:transparent}button.primary{background:light-dark(#303d8f,#adbaff);color:light-dark(#fff,#10183c);border-color:transparent}button.text{border:0;text-decoration:underline;padding:8px}button:disabled{cursor:wait;opacity:.6}button:focus-visible,input:focus-visible,summary:focus-visible{outline:3px solid light-dark(#6672cc,#aab8ff);outline-offset:3px}label{display:block;font-weight:600;margin:14px 0 6px}input[type=text]{width:100%;min-height:44px;border:1px solid var(--color-border-primary,light-dark(#bbc4d3,#596579));border-radius:8px;padding:10px;background:inherit;color:inherit}label.choice{font-weight:400;display:flex;gap:8px;align-items:center;min-height:44px;margin:0}input[type=checkbox]{width:18px;height:18px}.actions{display:flex;flex-wrap:wrap;gap:10px;margin-top:18px}#status{margin:12px 0;overflow-wrap:anywhere}#status.error{color:light-dark(#a52429,#ffabb0)}[hidden]{display:none!important}summary{cursor:pointer;min-height:44px;display:flex;align-items:center;text-decoration:underline}@media(max-width:420px){body{padding:12px}.surface{padding:14px}.actions>*{width:100%}.row{align-items:flex-start}}
+:root{color-scheme:light dark;font:15px/1.5 Arial,sans-serif;color:var(--color-text-primary,light-dark(#20242b,#f1f3f6));background:var(--color-background-primary,light-dark(#fff,#181b20))}*{box-sizing:border-box}body{margin:0;padding:20px}main{max-width:640px;margin:auto}h1{font-size:22px;line-height:1.3;margin:0 0 8px}h2{font-size:17px;margin:0 0 12px}p{margin:0 0 16px}.muted{color:var(--color-text-secondary,light-dark(#555e6e,#b7c0cf));font-size:14px}.surface{border:1px solid var(--color-border-primary,light-dark(#dfe3e9,#3c4350));border-radius:12px;padding:18px;margin:16px 0}.row{display:flex;align-items:center;justify-content:space-between;gap:12px}.path{overflow-wrap:anywhere;font-family:ui-monospace,monospace;font-size:13px}.check{margin:8px 0}.check span{margin-right:8px}button,input,select{font:inherit}button{min-height:44px;padding:10px 16px;border:1px solid var(--color-border-primary,light-dark(#ccd2dc,#515b6e));border-radius:8px;cursor:pointer;color:inherit;background:transparent}button.primary{background:light-dark(#303d8f,#adbaff);color:light-dark(#fff,#10183c);border-color:transparent}button.text{border:0;text-decoration:underline;padding:8px}button:disabled{cursor:wait;opacity:.6}button:focus-visible,input:focus-visible,select:focus-visible,summary:focus-visible{outline:3px solid light-dark(#6672cc,#aab8ff);outline-offset:3px}label{display:block;font-weight:600;margin:14px 0 6px}input[type=text],select{width:100%;min-height:44px;border:1px solid var(--color-border-primary,light-dark(#bbc4d3,#596579));border-radius:8px;padding:10px;background:inherit;color:inherit}label.choice{font-weight:400;display:flex;gap:8px;align-items:center;min-height:44px;margin:0}input[type=checkbox]{width:18px;height:18px}.actions{display:flex;flex-wrap:wrap;gap:10px;margin-top:18px}#status{margin:12px 0;overflow-wrap:anywhere}#status.error{color:light-dark(#a52429,#ffabb0)}[hidden]{display:none!important}summary{cursor:pointer;min-height:44px;display:flex;align-items:center;text-decoration:underline}@media(max-width:420px){body{padding:12px}.surface{padding:14px}.actions>*{width:100%}.row{align-items:flex-start}}
 </style></head><body><main aria-busy="false">
 <h1 id="title">Подключить Trelio к Codex</h1><p class="muted" id="company">Загрузка подключения…</p>
 <div id="setup" hidden><div class="check"><span aria-hidden="true">✓</span>Вход в Trelio подтверждён</div><div class="check"><span aria-hidden="true">✓</span>Разрешение Codex проверено</div>
 <section class="surface" aria-labelledby="folder-heading"><div class="row"><h2 id="folder-heading">Рабочая папка</h2><button class="text" id="modify" type="button" aria-controls="settings" aria-expanded="false">Изменить</button></div>
-<p id="name"></p><p id="path" class="path"></p><p class="muted">Здесь будут файлы настройки и рабочие материалы Trelio</p>
-<form id="settings" hidden><label for="display-name">Название подключения</label><input id="display-name" type="text" maxlength="200" required aria-describedby="name-help"><p class="muted" id="name-help">Сохраняется на этом компьютере. Проект в боковой панели Codex не создаётся</p>
+<div id="selected-folder"><p id="name"></p><p id="path" class="path"></p><p class="muted">Здесь будут файлы настройки и рабочие материалы Trelio</p></div>
+<div id="choose-target" hidden><p class="muted" id="choose-help">Выберите проект Codex или локальную папку для Trelio</p>
+<div class="actions"><button id="project-list" type="button" aria-controls="project-picker">Выбрать проект</button><button id="choose-folder" type="button">Выбрать папку</button></div></div>
+<div id="project-picker" hidden><label for="projects">Проекты Codex</label><select id="projects"></select>
+<div class="actions"><button id="use-project" type="button">Выбрать</button></div></div>
+<form id="settings" hidden><label for="display-name">Название подключения</label><input id="display-name" type="text" maxlength="200" required aria-describedby="name-help"><p class="muted" id="name-help">Сохраняется на этом компьютере</p>
 <label for="folder-path">Локальная папка</label><input id="folder-path" type="text" maxlength="4096" required autocomplete="off" aria-describedby="path-help"><p class="muted" id="path-help">Отдельная постоянная папка для Trelio. Репозиторий с кодом не подойдёт</p>
 <label class="choice"><input id="create" type="checkbox">Создать папку, если её ещё нет</label><div class="actions"><button id="pick" type="button">Выбрать существующую</button><button type="submit">Сохранить выбор</button></div></form></section>
-<p class="muted">По кнопке «Подключить» сохраним в папке файлы AGENTS.md и CLAUDE.md и зарегистрируем путь в вашем аккаунте Trelio. Файлы настройки сохраняют существующий текст</p>
+<p class="muted" id="connect-help">По кнопке «Подключить» сохраним в папке файлы AGENTS.md и CLAUDE.md и зарегистрируем путь в вашем аккаунте Trelio. Файлы настройки сохраняют существующий текст</p>
 <div class="actions"><button id="connect" class="primary" type="button">Подключить</button></div></div>
 <section class="surface" id="done" hidden><h2>Codex подключён</h2><p>Папка зарегистрирована в Trelio и проверена</p><p class="path" id="done-path"></p><p id="browser-help">Свяжите браузер с Codex, чтобы открывать новые чаты из задач Trelio.</p><div class="actions" id="browser-actions"><button class="primary" id="confirm-browser" type="button">Привязать к браузеру</button></div></section>
 <p id="status" role="status" aria-live="polite"></p>
@@ -1127,8 +1286,20 @@ function notice(text, error) {
   $('status').className = error ? 'error' : '';
   $('status').setAttribute('role', error ? 'alert' : 'status');
 }
-function fields() {
-  return {folderPath:$('folder-path').value, displayName:$('display-name').value, createFolder:$('create').checked};
+function fields(selectFolder) {
+  var result = {folderPath:$('folder-path').value, displayName:$('display-name').value, createFolder:$('create').checked};
+  if (selectFolder) result.selection = 'folder';
+  return result;
+}
+function editFolder(open) {
+  $('settings').hidden = !open;
+  $('modify').setAttribute('aria-expanded', String(open));
+  if (state?.selection === null) $('connect').hidden = !open;
+  if (open) {
+    $('project-picker').hidden = true;
+    $('folder-path').focus();
+  }
+  resize();
 }
 function resize() {
   window.parent.postMessage({jsonrpc:'2.0', method:'ui/notifications/size-changed',
@@ -1146,6 +1317,26 @@ function render(result) {
   $('folder-path').value = meta.folderPath;
   $('create').checked = meta.createFolder;
   var done = meta.stage === 'ready';
+  var needsSelection = meta.selection === null;
+  var waiting = meta.stage === 'project_pending';
+  $('selected-folder').hidden = needsSelection;
+  $('choose-target').hidden = meta.selection === undefined || meta.selection === 'current';
+  $('choose-help').hidden = !needsSelection;
+  $('modify').hidden = needsSelection;
+  $('connect').hidden = needsSelection && $('settings').hidden;
+  $('connect-help').hidden = needsSelection;
+  $('connect').textContent = waiting ? 'Попробовать снова' : 'Подключить';
+  if (meta.projectChoices) {
+    var projects = $('projects');
+    projects.replaceChildren();
+    meta.projectChoices.forEach(function(project) {
+      var option = document.createElement('option');
+      option.value = project.projectId;
+      option.textContent = project.name + ' · ' + project.folderPath;
+      projects.appendChild(option);
+    });
+    $('project-picker').hidden = meta.projectChoices.length === 0;
+  }
   $('setup').hidden = done; $('done').hidden = !done;
   // Folder registration alone leaves browser confirmation available for retry.
   // Once confirmed, hide the whole action row; additional profiles use Trelio's connections page.
@@ -1159,13 +1350,18 @@ function render(result) {
       DESKTOP_BROWSER_CONFIRMATION_UNCONFIRMED:'Привязка не завершена. Откройте страницу привязки снова',
       CODEX_CONNECTION_PICKER_UNAVAILABLE:'Окно выбора папки недоступно. Укажите абсолютный путь в поле «Локальная папка»',
       CODEX_CONNECTION_BINDING_CONFLICT:'Эта папка связана с другой компанией или проектом. Выберите отдельную папку',
-      CODEX_CONNECTION_PROJECT_FOLDER_CHANGED:'Codex больше не подтверждает этот путь. Откройте подключение из нужного проекта',
+      CODEX_CONNECTION_PROJECT_FOLDER_CHANGED:'Codex больше не подтверждает этот путь. Выберите проект снова',
+      CODEX_CONNECTION_PROJECT_LIST_UNAVAILABLE:'Список проектов недоступен. Откройте нужную папку в Codex и запустите мастер из её проекта',
+      CODEX_CONNECTION_PROJECT_OPEN_UNAVAILABLE:'Откройте выбранную папку в Codex, подтвердите доверие и повторите проверку здесь',
+      CODEX_CONNECTION_SELECTION_REQUIRED:'Выберите проект или папку',
       CODEX_CONNECTION_REGISTRATION_UNCONFIRMED:'Trelio пока не подтвердил регистрацию. Проверьте соединение и повторите проверку',
       CODEX_CONNECTION_READBACK_FAILED:'Не удалось подтвердить путь в Trelio. Повторите проверку',
       CODEX_CONNECTION_FOLDER_UNSAFE:'Папка содержит символическую ссылку. Выберите обычную локальную папку'
     };
     notice((meta.gitBlockerMessage || messages[meta.errorCode] || 'Настройка не завершена. Проверьте папку, повторите проверку или передайте код ошибки агенту') + ' (' + meta.errorCode + ')', true);
-  } else notice(done ? 'Подключение проверено' : '', false);
+  } else notice(done ? 'Подключение проверено'
+    : waiting ? 'Подтвердите доверие к папке в окне Codex. Затем вернитесь сюда и повторите проверку.'
+    : meta.projectChoices?.length === 0 ? 'Подходящих проектов пока нет. Выберите локальную папку.' : '', false);
   resize();
 }
 function continueInChat() {
@@ -1209,26 +1405,36 @@ function receiveOpeningResult(result) {
 function setBusy(value) {
   busy = value;
   document.querySelector('main').setAttribute('aria-busy', String(value));
-  document.querySelectorAll('button,input').forEach(function(el) { el.disabled = value });
+  document.querySelectorAll('button,input,select').forEach(function(el) { el.disabled = value });
 }
 function unconfirmed(text) {
   // A timeout, expired card or host-level refusal must hide the previous ready
   // screen too. Retain the input so reopening/rechecking can reconcile it.
   $('done').hidden = true; $('setup').hidden = false; notice(text, true);
 }
-async function action(kind, settings) {
+async function action(kind, settings, projectId) {
   if (busy || !cap) return;
   var requestCap = cap;
+  var focusTarget;
   setBusy(true);
-  notice(kind === 'connect' ? 'Проверяем папку, сохраняем настройки и подтверждаем регистрацию в Trelio…'
+  notice(kind === 'connect' && (state.selection === 'folder' || settings?.selection === 'folder')
+    ? 'Если Codex спросит о доверии, подтвердите его и вернитесь к этому чату.'
+    : kind === 'connect' ? 'Проверяем папку, сохраняем настройки и подтверждаем регистрацию в Trelio…'
     : kind === 'confirm_browser' ? 'Подтвердите привязку в открывшейся вкладке Trelio…' : 'Проверяем подключение…', false);
   try {
     var args = {capabilityToken:requestCap, action:kind};
     if (settings) args.settings = settings;
+    if (projectId) args.projectId = projectId;
     var result = await rpc('tools/call', {name:'codex_connection_app_action', arguments:args});
     // A late response from a superseded card cannot restore an old connection.
     if (requestCap !== cap) return;
     render(result);
+    if (kind === 'list_projects' && !$('project-picker').hidden) focusTarget = $('projects');
+    if (!result?.isError && ['select_project', 'save', 'pick'].includes(kind) && state.selection) {
+      editFolder(false);
+      $('project-picker').hidden = true;
+      focusTarget = $('connect');
+    }
     // Only the user's Connect click starts a browser exchange, and only
     // after verified registration. Rendering or reopening a card never does.
     // Keep the existing protected App action and its separate time budget.
@@ -1245,14 +1451,26 @@ async function action(kind, settings) {
     }
   } catch (e) {
     if (requestCap === cap) unconfirmed('Нет ответа от Codex. Повторно откройте мастер в этом чате');
-  } finally { setBusy(false); resize() }
+  } finally {
+    setBusy(false);
+    if (requestCap === cap) focusTarget?.focus();
+    resize();
+  }
 }
 $('modify').onclick = function() {
-  var open = $('settings').hidden;
-  $('settings').hidden = !open;
-  $('modify').setAttribute('aria-expanded', String(open));
-  if (open) $('display-name').focus();
-  resize();
+  editFolder($('settings').hidden);
+};
+$('choose-folder').onclick = function() { editFolder(true) };
+$('project-list').onclick = function() {
+  // Keep the local draft visible until its explicit save. The project reader
+  // never discards an edited path or sends it to the native catalog.
+  if (dirty) return notice('Сначала сохраните выбор папки', true);
+  editFolder(false);
+  return action('list_projects');
+};
+$('use-project').onclick = function() {
+  var projectId = $('projects').value;
+  if (projectId) return action('select_project', undefined, projectId);
 };
 // Settings have one explicit local Save. Its pending/error lifecycle is the
 // same as Connect; beforeunload protects only the unsaved local draft.
@@ -1260,10 +1478,10 @@ window.addEventListener('beforeunload', function(event) {
   if (dirty) { event.preventDefault(); event.returnValue = '' }
 });
 $('settings').oninput = function() { dirty = true };
-$('settings').onsubmit = function(event) { event.preventDefault(); return action('save', fields()) };
+$('settings').onsubmit = function(event) { event.preventDefault(); return action('save', fields(true)) };
 $('pick').onclick = function() { return action('pick', fields()) };
 $('connect').onclick = function() {
-  if ($('settings').hidden || $('settings').reportValidity()) return action('connect', fields());
+  if ($('settings').hidden || $('settings').reportValidity()) return action('connect', fields(!$('settings').hidden));
 };
 $('confirm-browser').onclick = function() { return action('confirm_browser') };
 window.addEventListener('message', function(event) {

@@ -332,6 +332,63 @@ test("a project change after the wizard opened blocks both folder writes and reg
   assert.equal(fixture.puts, 0);
 });
 
+test("a projectless wizard requires an explicit choice and revalidates a listed project", async t => {
+  const fixture = await wizardFixture(t, true);
+  const projectId = "44444444-4444-4444-8444-444444444444";
+  const folderPath = path.join(fixture.root, "Existing project");
+  await fs.mkdir(folderPath);
+  const opened = await fixture.open({ codexThreadId: "33333333-3333-7333-8333-333333333333", readProjectFolder: async () => null });
+  const meta = opened._meta["trelio/codexConnection"];
+  assert.equal(meta.selection, null);
+  let project = { projectId, name: "Existing project", folderPaths: [folderPath] };
+  const dependencies = { bridge: fixture.bridge, listProjectFolders: async () => [project],
+    readProjectById: async () => project,
+    openProject: async () => assert.fail("An existing project must not prompt for trust again") };
+  const action = (action, fields) => handleCodexConnectionAction(fixture.origin, {
+    capabilityToken: meta.capabilityToken, action, ...fields,
+  }, dependencies);
+  assert.equal((await action("connect")).structuredContent.code, "CODEX_CONNECTION_SELECTION_REQUIRED");
+  assert.equal((await action("select_project", { projectId })).structuredContent.code, "CODEX_CONNECTION_INVALID_INPUT");
+  const list = await action("list_projects");
+  assert.deepEqual(list._meta["trelio/codexConnection"].projectChoices, [{ projectId, name: project.name, folderPath }]);
+  assert.ok(!JSON.stringify(list.structuredContent).includes(projectId));
+  assert.ok(!JSON.stringify(list.content).includes(folderPath));
+  assert.equal((await action("select_project", { projectId }))._meta["trelio/codexConnection"].selection, "project");
+  project = { ...project, folderPaths: [path.join(fixture.root, "Moved")] };
+  assert.equal((await action("connect")).structuredContent.code, "CODEX_CONNECTION_PROJECT_FOLDER_CHANGED");
+  assert.equal(fixture.puts, 0);
+  assert.deepEqual(await fs.readdir(folderPath), []);
+  project.folderPaths = [folderPath];
+  assert.equal((await action("connect")).structuredContent.verified, true);
+  assert.equal(fixture.puts, 1);
+});
+
+test("a new Mac folder waits for native trust before Trelio writes and retries the same root", async t => {
+  const fixture = await wizardFixture(t, true);
+  const folderPath = path.join(fixture.root, "New folder");
+  const opened = await fixture.open({ codexThreadId: "33333333-3333-7333-8333-333333333333", readProjectFolder: async () => null });
+  const { capabilityToken } = opened._meta["trelio/codexConnection"];
+  let openedCount = 0;
+  let projects = [];
+  const dependencies = { bridge: fixture.bridge, platform: "darwin", projectTrustWaitMs: 0,
+    listProjectFolders: async () => projects,
+    openProject: async selected => {
+      assert.equal(selected, folderPath);
+      openedCount++;
+      assert.deepEqual(await fs.readdir(folderPath), []);
+    } };
+  const first = await handleCodexConnectionAction(fixture.origin, { capabilityToken, action: "connect",
+    settings: { folderPath, displayName: "New folder", createFolder: true, selection: "folder" } }, dependencies);
+  assert.deepEqual(first.structuredContent, { stage: "project_pending", verified: false });
+  assert.equal(fixture.puts, 0);
+  assert.deepEqual(await fs.readdir(folderPath), []);
+  projects = [{ projectId: "native-project", name: "New folder", folderPaths: [folderPath] }];
+  assert.equal((await handleCodexConnectionAction(fixture.origin, { capabilityToken, action: "connect" }, dependencies))
+    .structuredContent.verified, true);
+  assert.equal(openedCount, 1);
+  assert.equal(fixture.puts, 1);
+});
+
 for (const phase of ["registration", "browser confirmation"]) {
   test(`wizard verifies isolation before success when service Git appears during ${phase}`, async t => {
     const fixture = await wizardFixture(t, true);
@@ -760,7 +817,7 @@ test("native folder dialog uses fixed code on macOS/Windows/Linux and preserves 
 test("wizard App handles real host RPC, disables duplicate actions and renders verified/error results", async t => {
   const fixture = await wizardFixture(t);
   const listeners = {}, messages = [], elements = new Map();
-  for (const id of ["title", "company", "setup", "done", "name", "path", "done-path", "display-name", "folder-path", "create", "status", "settings", "modify", "pick", "connect", "main", "browser-actions", "confirm-browser", "browser-help"]) {
+  for (const id of ["title", "company", "setup", "done", "name", "path", "done-path", "display-name", "folder-path", "create", "status", "settings", "modify", "pick", "connect", "main", "browser-actions", "confirm-browser", "browser-help", "choose-target", "choose-help", "selected-folder", "project-list", "choose-folder", "project-picker", "projects", "use-project", "connect-help"]) {
     elements.set(id, { hidden: id === "settings", value: "", checked: false, textContent: "", disabled: false,
       setAttribute() {}, focus() {}, reportValidity: () => true });
   }
@@ -785,6 +842,7 @@ test("wizard App handles real host RPC, disables duplicate actions and renders v
     codexThreadId: "33333333-3333-7333-8333-333333333333", readProjectFolder: async () => null });
   receive({ jsonrpc: "2.0", method: "ui/notifications/tool-result", params: opened });
   assert.equal(elements.get("setup").hidden, false);
+  assert.equal(elements.get("connect").hidden, true);
   show([{ isIntersecting: true, intersectionRect: { width: 0, height: 120 } }]);
   assert.equal(messages.some(message => message.method === "tools/call"), false, "Hidden or zero-width controls cannot acknowledge");
   show([{ isIntersecting: true, intersectionRect: { width: 200, height: 120 } }]);
@@ -808,6 +866,7 @@ test("wizard App handles real host RPC, disables duplicate actions and renders v
   const { stdout } = await fixtureGit("write-tree");
   await fs.rm(index);
   const treeId = stdout.trim();
+  elements.get("choose-folder").onclick();
   elements.get("folder-path").value = existing;
   elements.get("display-name").value = "App fixture"; elements.get("create").checked = true;
   const clicked = elements.get("connect").onclick();
@@ -816,7 +875,8 @@ test("wizard App handles real host RPC, disables duplicate actions and renders v
   assert.equal(calls.length, 1);
   assert.equal(elements.get("connect").disabled, true);
   const [connect] = calls;
-  const submitted = await handleCodexConnectionAction(fixture.origin, structuredClone(connect.params.arguments), { bridge: fixture.bridge });
+  const submitted = await handleCodexConnectionAction(fixture.origin, structuredClone(connect.params.arguments), { bridge: fixture.bridge,
+    listProjectFolders: async () => [{ projectId: "existing", folderPaths: [existing] }] });
   receive({ jsonrpc: "2.0", id: connect.id, result: submitted });
   assert.match(await fs.readFile(path.join(existing, "AGENTS.md"), "utf8"), /trelio-agent-workspaces:start/u);
   assert.match(await fs.readFile(path.join(existing, ".gitignore"), "utf8"), /^\/workspaces\/$/mu);

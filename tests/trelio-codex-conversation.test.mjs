@@ -10,7 +10,7 @@ import fs from 'node:fs/promises';
 import os from 'node:os';
 import { createHash } from 'node:crypto';
 import { pathToFileURL } from 'node:url';
-import { readCodexConversationTitle, readCodexProjectFolder, syncRunCodexConversationTitle,resolveCodexExecutable,readWindowsCodexPackagePath,buildCodexEnvironment } from "../host-runtime/scripts/trelio-codex-conversation.mjs";
+import { readCodexConversationTitle, readCodexProjectFolder, listCodexProjectFolders, syncRunCodexConversationTitle,resolveCodexExecutable,readWindowsCodexPackagePath,buildCodexEnvironment } from "../host-runtime/scripts/trelio-codex-conversation.mjs";
 import { protectLocalActionArguments } from "../host-runtime/scripts/trelio-local-context.mjs";
 import { createAgentEncryptionDevice, decryptCompanyPayload } from "../host-runtime/scripts/trelio-company-encryption.mjs";
 import { synchronizeRunCodexTitle, retainLoadedCodexPluginInstallation, migrateHumanCodexHookComponent,
@@ -1317,6 +1317,30 @@ test("Codex project lookup uses the active thread's exact native project without
   assert.deepEqual(server.requests[2].params, { threadId: id, includeTurns: false });
   assert.deepEqual(server.requests[3].params, { projectId });
   assert.equal(server.killed, true);
+});
+
+test("Codex project catalog projects only local roots and rejects a truncated inventory", async () => {
+  const folderPath = path.resolve("project-root");
+  const listing = complete => fakeServer((request, output) => {
+    if (request.id === 1) reply(output, { id: 1, result: {} });
+    if (request.id === 2) reply(output, { id: 2, result: { nextCursor: "page-two",
+      data: [{ id: "local", name: "Local folder", roots: [{ path: folderPath }], metadata: { private: "discard" } },
+        { id: "relative", roots: [{ path: "untrusted-relative" }] }] } });
+    if (request.id === 3 || request.id === 4) reply(output, { id: request.id,
+      result: { data: [], nextCursor: complete ? null : "unfinished" } });
+  });
+  const server = listing(true);
+  assert.deepEqual(await listCodexProjectFolders({ executable: "/exact/codex", spawnProcess: server.spawnProcess }),
+    [{ projectId: "local", name: "Local folder", folderPaths: [folderPath] }]);
+  assert.deepEqual(server.requests.slice(2).map(({ method, params }) => ({ method, params })), [
+    { method: "project/list", params: { limit: 100 } },
+    { method: "project/list", params: { limit: 100, cursor: "page-two" } },
+  ]);
+  assert.equal(server.killed, true);
+  const partial = listing(false);
+  assert.equal(await listCodexProjectFolders({ executable: "/exact/codex", spawnProcess: partial.spawnProcess }), null);
+  assert.equal(partial.requests.filter(request => request.method === "project/list").length, 3);
+  assert.equal(partial.killed, true);
 });
 
 test("Codex project lookup leaves projectless, remote, inconsistent and ambiguous roots unselected", async () => {
