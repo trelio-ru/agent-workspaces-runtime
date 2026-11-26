@@ -485,6 +485,15 @@ export const registerAndVerifyCodexLaunchFolder = async ({ origin, token, folder
 
 const wizardError = code => Object.assign(new Error(code), { code });
 
+// Only the local capability guard can produce this diagnostic reason. Keep
+// other errors, even ones with the same message or code property, untyped.
+export class CodexConnectionExpiredError extends Error {
+  constructor() {
+    super("CODEX_CONNECTION_EXPIRED");
+    this.code = "CODEX_CONNECTION_EXPIRED";
+  }
+}
+
 // The wizard belongs to the signed runtime, alongside existing Codex folder
 // navigation. It neither changes the stable plugin shell nor uses a business Run.
 export const CODEX_CONNECTION_RESOURCE = "ui://trelio/codex-connection-v1.html";
@@ -920,7 +929,7 @@ export const handleCodexConnectionAction = async (origin, input, dependencies = 
   if (!object(input) || Object.keys(input).some(key => !["capabilityToken", "action", "settings"].includes(key))
     || !["state", "pick", "save", "connect", "confirm_browser", "presented"].includes(input.action)) throw wizardError("CODEX_CONNECTION_INVALID_INPUT");
   const cap = wizardCapabilities.get(input.capabilityToken);
-  if (!cap || cap.origin !== origin || cap.expiresAt <= Date.now()) throw wizardError("CODEX_CONNECTION_EXPIRED");
+  if (!cap || cap.origin !== origin || cap.expiresAt <= Date.now()) throw new CodexConnectionExpiredError();
   if (input.action === "presented") {
     // This is only evidence that the host reached the App. User actions
     // still recheck live device, company, folder and registration permissions.

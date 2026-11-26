@@ -2831,6 +2831,12 @@ container types. Array item не содержит index/value; unknown key св�
 остальные structural keys), произвольное имя становится `unknown`.
 Parent diagnosticCode/field и validation-before-child остаются прежними.
 
+Локальная проверка capability мастера Codex записывает
+`codex_connection_app_action / CODEX_CONNECTION_EXPIRED` для отсутствующей,
+истёкшей или привязанной к другому origin capability. Классификация основана
+на типизированном отказе этого guard. Формат App-ответа сохраняется, код в
+телеметрии проходит обычное согласование словаря со старым backend.
+
 Collector запоминает фазу credential, capabilities headers/body, observations
 headers/body, legacy и acknowledgement. Rejection различает body limit/JSON/
 schema/catalog, credential missing/read failure и полученный HTTP error status.

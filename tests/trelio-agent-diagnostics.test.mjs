@@ -659,6 +659,62 @@ test("all registered local MCP tools have a closed diagnostic name, including wi
   for (const tool of catalog.result.tools) assert.equal(buildDiagnosticObservation(tool.name, {}).tool, tool.name);
 });
 
+test("a missing Codex wizard capability reaches telemetry as a typed recovery outcome", async () => {
+  const code = "CODEX_CONNECTION_EXPIRED";
+  const tool = "codex_connection_app_action";
+  const capabilityToken = randomUUID() + randomUUID();
+  const origin = "https://fixture.invalid";
+  const call = { jsonrpc: "2.0", id: 1, method: "tools/call", params: {
+    name: tool, arguments: { capabilityToken, action: "state" },
+  } };
+  let observed;
+  const reporter = createAgentDiagnosticReporter({ send: async (_origin, samples) => { observed = samples; } });
+  try {
+    const response = await handleLocalMcpMessage(call, { origin, recordDiagnostic: reporter.record });
+    assert.equal(response.result.isError, true);
+    assert.deepEqual(JSON.parse(response.result.content[0].text), { code: "REMOTE_MCP_HOST_ERROR", message: code });
+    await reporter.flush();
+  } finally {
+    reporter.close();
+  }
+  assert.equal(observed.length, 1);
+  const [sample] = observed;
+  assert.equal(sample.tool, tool);
+  assert.deepEqual(sample.outcomes, [{ code, field: "unknown", count: 1 }]);
+  assert.equal(contract.codeCategories[code], "recovery");
+  assert.ok(!JSON.stringify(sample).includes(capabilityToken));
+
+  // Exercise the actual transport projection against both advertised catalogues.
+  const original = structuredClone(sample);
+  for (const advertised of [true, false]) {
+    let delivered;
+    const transport = createObservationTransport({ readToken: async () => "synthetic", fetchImpl: async (url, options) => {
+      if (url.pathname.endsWith("capabilities")) return Response.json({
+        schemaVersion: 2, errorCodes: contract.errorCodes.filter(value => advertised || value !== code),
+        tools: contract.localTools, validationFields: contract.validationFields,
+      });
+      delivered = JSON.parse(options.body).samples[0];
+      return new Response(null, { status: 204 });
+    } });
+    await transport(origin, [sample]);
+    assert.equal(delivered.id, sample.id);
+    assert.equal(delivered.tool, tool);
+    assert.deepEqual(delivered.outcomes, [{
+      code: advertised ? code : "DIAGNOSTICS_CODE_UNSUPPORTED", field: "unknown", count: 1,
+    }]);
+    assert.deepEqual(delivered.losses, advertised ? [] : [{ reason: "catalog_mismatch", count: 1 }]);
+    assert.deepEqual(sample, original);
+  }
+
+  const untrustedOutcomeCodes = [];
+  await handleLocalMcpMessage(call, {
+    origin,
+    callTool: async () => { throw Object.assign(new Error(code), { code }); },
+    recordDiagnostic: (_tool, _args, outcome) => untrustedOutcomeCodes.push(outcome),
+  });
+  assert.deepEqual(untrustedOutcomeCodes, ["REMOTE_MCP_HOST_ERROR"]);
+});
+
 test("new tool and validation dimensions negotiate down-level servers without losing paired counts", async () => {
   for (const mode of ["new", "old", "legacy"]) {
     let body;

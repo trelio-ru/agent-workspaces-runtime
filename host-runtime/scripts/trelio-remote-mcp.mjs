@@ -14,7 +14,7 @@ import { withBrowserAccountState, skillResourcePolicy } from "./trelio-browser-s
  * bytes stay in a private local file and are sent only to the exact validated
  * HTTPS endpoint. Remote content is always returned as untrusted tool data.
  */
-import { CODEX_CONNECTION_ACTION, CODEX_CONNECTION_PRESENTATION, CODEX_CONNECTION_RESOURCE, codexConnectionAppResource, openCodexConnectionWizard, checkCodexConnectionPresentation, handleCodexConnectionAction, normalizeCodexNavigationThreadId, createDeepseekDesktopNavigation, isDeepseekDesktopHost, confirmDesktopBrowser, confirmManualCodexBrowser } from "./trelio-codex-conversation.mjs";
+import { CODEX_CONNECTION_ACTION, CODEX_CONNECTION_PRESENTATION, CODEX_CONNECTION_RESOURCE, CodexConnectionExpiredError, codexConnectionAppResource, openCodexConnectionWizard, checkCodexConnectionPresentation, handleCodexConnectionAction, normalizeCodexNavigationThreadId, createDeepseekDesktopNavigation, isDeepseekDesktopHost, confirmDesktopBrowser, confirmManualCodexBrowser } from "./trelio-codex-conversation.mjs";
 import crypto from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
 import { cleanNativeRuntimeToolArguments, prepareCodexMcpToolArguments, prepareNativeRuntimeToolArguments } from "./trelio-runtime-session.mjs";
@@ -7191,7 +7191,11 @@ export const handleLocalMcpMessage = async (
     } catch (error) {
       const effectiveError = error;
       const errorPayload = safeErrorPayload(effectiveError);
-      let diagnosticCode = errorPayload.code;
+      // Preserve the App's response contract and report the exact local guard
+      // outcome separately. Generic errors and provider code properties cannot
+      // select this bucket.
+      let diagnosticCode = effectiveError instanceof CodexConnectionExpiredError
+        ? effectiveError.code : errorPayload.code;
       // Reuse the published Trelio deadline bucket without widening the
       // backend-owned telemetry vocabulary or degrading this result to UNKNOWN.
       if (effectiveError instanceof TrelioCallTimeoutError

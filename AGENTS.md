@@ -1851,6 +1851,7 @@ Exact legacy template bytes для распознавания при мигра�
   replace the first manifest or its frozen reuse set.
 - Additive diagnostic kinds are negotiated independently from detailEvidenceVersion;
   preserve frozen UUID/counters and never derive retry authority from evidence.
+  Codex wizard capability diagnostics come from its typed local guard.
   See [closed diagnostics](docs/agent-workspace-runtime.md#closed-runtime-diagnostic-details).
 
 ## Git workflow
