@@ -196,7 +196,12 @@ export const browserFillBinding = (context) => {
     // This witness is meaningful only for one top-level managed document.
     // Preserve it across preflight/consume equality and keep marked plans
     // out of native tab selection and separate Chrome profiles.
-    const { observedFrameSha256 } = step;
+    const { observedFrameSha256, privateTarget } = step;
+    if (privateTarget !== undefined && (privateTarget !== true || context.holder !== undefined
+      || steps.length !== 1 || observedFrameSha256 !== undefined || step.frames !== undefined
+      || step.activationSelector !== undefined || step.submitSelector !== undefined)) {
+      throw new SecretBrowserFillError("Invalid private browser address.");
+    }
     if (observedFrameSha256 !== undefined && (typeof observedFrameSha256 !== 'string'
       || !/^[0-9a-f]{64}$/u.test(observedFrameSha256) || steps.length !== 1 || step.frames || step.activationSelector)) {
       throw new SecretBrowserFillError("Invalid managed browser observation.");
@@ -229,6 +234,7 @@ export const browserFillBinding = (context) => {
     return {
       targetOrigin: step.targetOrigin,
       targetUrlSha256: step.targetUrlSha256,
+      ...(privateTarget === true ? { privateTarget } : {}),
       ...(observedFrameSha256 === undefined ? {} : { observedFrameSha256 }),
       ...(frames ? { frames } : {}),
       fields,
@@ -447,6 +453,10 @@ const prepareSecretBrowserSessionInternal = async ({
   onPreflightPhase,
 }) => {
   mode = normalizeSecretBrowserMode(mode);
+  const privateTarget = context?.browserSteps?.[0]?.privateTarget === true;
+  if (privateTarget && (prepareManaged || mode !== "embedded" || targetUrl !== undefined)) {
+    throw new SecretBrowserFillError("A private address requires its original native tab and no raw URL.", "target_url_changed");
+  }
   if (prepareManaged && mode === "auto") {
     // A known owned browser must pass its own exact-document preflight. Its
     // refusal propagates. Only absence of a managed worker uses the legacy
@@ -499,7 +509,10 @@ const prepareSecretBrowserSessionInternal = async ({
   try {
     if (!context) throw new EmbeddedBrowserUnavailable("backend_unavailable");
     const binding = browserFillBinding(context);
-    normalizeSecretBrowserTarget(targetUrl, binding.targetOrigin, binding.targetUrlSha256);
+    if (!privateTarget) normalizeSecretBrowserTarget(targetUrl, binding.targetOrigin, binding.targetUrlSha256);
+    // The native helper already verifies origin and full-URL SHA-256 from
+    // the observed document. Requiring the original address in argv would
+    // disclose the provider's opaque login continuation without adding proof.
     if (!["darwin", "win32"].includes(platform)) throw new EmbeddedBrowserUnavailable("platform_unsupported");
     if (!["codex", "claude-code"].includes(binding.clientFamily)) throw new EmbeddedBrowserUnavailable("client_unsupported");
     if (binding.browserSteps.some((step) => (

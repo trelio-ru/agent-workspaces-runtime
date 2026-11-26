@@ -656,6 +656,9 @@ publication tooling также остаются вне этого публичн
   потерянный ответ и передача значения повторов не допускают; field-only grant
   сохраняет привязку к embedded-вкладке даже при недоступном дереве.
   Signed Chrome discovery не зависит от locator; field-only сохраняет вкладку.
+  Private browser target принимает только origin и digest document URL в
+  ordinary native fill; context и consume подтверждают отдельную capability.
+  Managed assistant frame binding остаётся самостоятельным.
   macOS исключает процесс с неподтверждённой подписью до AX. Отказ одного
   процесса не блокирует проверенный браузер. Без проверенных процессов
   подготовка останавливается, подпись выбранного процесса проверяется перед записью.

@@ -20543,6 +20543,8 @@ export const withBrowserFailureStage = async (stage, action) => {
   }
 };
 
+const privateBrowserTargetHeaders = { "x-trelio-agent-secret-private-browser-target": "v1" };
+
 const prepareSecretBrowserFillAction = async (options, positional, onPreflightPhase, {
   metadata,
   workspaceOrigin,
@@ -20565,12 +20567,13 @@ const prepareSecretBrowserFillAction = async (options, positional, onPreflightPh
   if(profile && typeof profile.resolveSecretBrowserStorage!=='function')denyWorkspaceExecutionProfile();
   const browserStorage=profile ? await profile.resolveSecretBrowserStorage({configDirectory:CONFIG_DIRECTORY,grantId,runId:metadata.runId})
     : {directory:path.join(SECRET_BROWSER_DIRECTORY,'native'),profileDirectory:SECRET_BROWSER_PROFILE_DIRECTORY};
-  // An omitted URL is valid only in the already-verified managed task
-  // profile. Old callers and the ordinary CLI still need their exact URL.
-  if (browserStorage.observed ? targetUrl !== undefined || options.browser !== undefined : targetUrl === undefined) {
+  const browserMode = normalizeSecretBrowserMode(options.browser);
+  // The owned managed browser has a separate signed frame binding. Ordinary
+  // bridge calls without a URL are accepted solely for native private targets.
+  const privateTarget = !profile && browserMode === "embedded" && targetUrl === undefined;
+  if (browserStorage.observed ? targetUrl !== undefined || options.browser !== undefined : !privateTarget && targetUrl === undefined) {
     throw new Error("Browser-fill target does not match the protected browser profile.");
   }
-  const browserMode = normalizeSecretBrowserMode(options.browser);
   onPreflightPhase("grant_context");
   let browserContext;
   // GET не содержит value/ciphertext, не claim-ит grant и безопасен для
@@ -20579,7 +20582,8 @@ const prepareSecretBrowserFillAction = async (options, positional, onPreflightPh
   for (let attempt = 1; attempt <= 3; attempt += 1) {
     try {
       const contextResponse = await withBrowserFailureStage("context", () => request(workspaceOrigin, token,
-        `/api/agent-secrets/checkout-grants/${grantId}/browser-fill-context?runId=${metadata.runId}`));
+        `/api/agent-secrets/checkout-grants/${grantId}/browser-fill-context?runId=${metadata.runId}`,
+        privateTarget ? { headers: privateBrowserTargetHeaders } : undefined));
       browserContext = await withBrowserFailureStage("context", () => contextResponse.json());
       if (browserContext.grantId !== grantId || browserContext.runId !== metadata.runId) {
         throw rememberDiagnosticDetail(new SecretBrowserFillError("Browser context принадлежит другому grant или Run."),
@@ -20604,13 +20608,13 @@ const prepareSecretBrowserFillAction = async (options, positional, onPreflightPh
   // The native grant context attests an own personal card independently of
   // Workspace encryption. Company cards keep the fail-closed E2EE decoder.
   const ownKeyringCard = profile?.kind === 'digital_assistant' && browserContext.holder === 'assistant';
-  return { browserSession, browserContext, companyEncryption, workspaceOrigin, token, grantId, runId: metadata.runId, ownKeyringCard };
+  return { browserSession, browserContext, companyEncryption, workspaceOrigin, token, grantId, runId: metadata.runId, ownKeyringCard, privateTarget };
 };
 
 const executeSecretBrowserFill = async (options, positional) => {
   // The inner deadline is exclusively value-free. Await its successful
   // completion before there is any path to atomically spend the grant.
-  const { browserSession, browserContext, companyEncryption, workspaceOrigin, token, grantId, runId, ownKeyringCard } =
+  const { browserSession, browserContext, companyEncryption, workspaceOrigin, token, grantId, runId, ownKeyringCard, privateTarget } =
     await withSecretBrowserPreflight((onPreflightPhase) => withRun((context) =>
       prepareSecretBrowserFillAction(options, positional, onPreflightPhase, context)));
   try {
@@ -20618,7 +20622,7 @@ const executeSecretBrowserFill = async (options, positional) => {
     // URL не доверяется: helper повторно сравнит его с закреплённым origin.
     const response = await withBrowserFailureStage("consume", () => request(workspaceOrigin, token, `/api/agent-secrets/checkout-grants/${grantId}/consume`, {
       method: "POST",
-      headers: { "content-type": "application/json" },
+      headers: { "content-type": "application/json", ...(privateTarget ? privateBrowserTargetHeaders : {}) },
       body: JSON.stringify({ runId }),
     }));
     const payload = await withBrowserFailureStage("consume", () => response.json());

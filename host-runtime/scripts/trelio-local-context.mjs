@@ -11236,12 +11236,15 @@ export const buildTrelioWorkspaceActionInvocation = (rawInput, { managedBrowserF
     ];
   } else if (operation === "secret_browser_fill") {
     assertWorkspaceActionKeys(parameters, new Set(managedBrowserFill ? ["grantId"] : ["grantId", "targetUrl", "browser"]));
+    // Only a native-only action can omit the raw address. The bridge still
+    // checks the live grant's private-target marker before any browser scan.
+    const omitTarget = managedBrowserFill || parameters.targetUrl === undefined && parameters.browser === "embedded";
     argumentsList = [
       "secret",
       "browser-fill",
       "--grant",
       normalizeWorkspaceActionUuid(parameters.grantId, "parameters.grantId"),
-      ...(managedBrowserFill ? [] : ["--target", normalizeWorkspaceActionHttpsUrl(parameters.targetUrl, "parameters.targetUrl")]),
+      ...(omitTarget ? [] : ["--target", normalizeWorkspaceActionHttpsUrl(parameters.targetUrl, "parameters.targetUrl")]),
     ];
     if (parameters.browser !== undefined) {
       if (!["auto", "embedded", "chrome"].includes(parameters.browser)) {

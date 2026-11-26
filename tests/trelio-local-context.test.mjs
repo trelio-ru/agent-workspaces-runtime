@@ -210,6 +210,18 @@ test("browser choice stays an enum in the typed Workspace action", () => {
   }
 });
 
+test("only the original native browser action can omit a private address from argv", () => {
+  const invoke = browser => buildTrelioWorkspaceActionInvocation({
+    schemaVersion: 1, operation: "secret_browser_fill", workingDirectory: actionWorkingDirectory,
+    parameters: { grantId: actionGrantId, browser },
+  });
+  assert.deepEqual(invoke("embedded").argumentsList,
+    ["secret", "browser-fill", "--grant", actionGrantId, "--browser", "embedded"]);
+  for (const browser of ["auto", "chrome", undefined]) {
+    assert.throws(() => invoke(browser));
+  }
+});
+
 test("typed Workspace dispatcher covers every public bridge operation without shell input", () => {
   const actions = [
     ["doctor", { json: true }],

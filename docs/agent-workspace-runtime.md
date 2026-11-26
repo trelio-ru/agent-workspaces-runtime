@@ -1131,6 +1131,16 @@ consume; секрет не входит в MCP/browser-tool input/output, argv, 
 диагностику. Runtime выбирает transport до consume; после выдачи нет повторной
 подстановки или смены поверхности.
 
+Для private-target grant native helper получает тот же origin/full-URL SHA-256,
+но bridge action и argv не несут исходного адреса. Пропуск `--target` разрешён
+только для `--browser embedded` с соответствующим маркером grant, одним
+top-level полем или набором полей и без автоматического клика. Старое требование
+`--target` для обычного URL сохраняется. Runtime передаёт
+`x-trelio-agent-secret-private-browser-target: v1` на context и consume.
+Маркер и хеш входят в сравнение binding. Отдельный Chrome и managed frame
+transport для этого grant недопустимы. Сравнение полного URL в AX/UIA, включая
+query/fragment, и повторная проверка объекта перед setter сохраняются.
+
 Native id locators сохраняют прежний ABI. Явный `input[type="password"]`
 (также с одинарными кавычками или без них) передаётся helper как
 `passwordInput=true`, не как пустой id. AXSecureTextField / UIA IsPassword

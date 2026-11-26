@@ -152,6 +152,35 @@ test("native id-less password binding is explicit; names never become guessed AX
   await session.close();
 });
 
+test("a private challenge address fills the exact native document without receiving the URL", async () => {
+  const f = fixture({ status: "ready", application: "client" });
+  const targetUrlSha256 = createHash("sha256").update("https://login.example.test/verify?flow=PRIVATE_ADDRESS_CANARY").digest("hex");
+  const args = { ...f.args, targetUrl: undefined, mode: "embedded",
+    context: { ...f.args.context, targetUrlSha256, fieldKeys: ["totp"], browserSteps: [{
+      targetOrigin: f.args.context.targetOrigin, targetUrlSha256, privateTarget: true,
+      fields: [{ fieldKey: "totp", selector: "#code" }],
+    }] },
+  };
+  for (const unsafe of [{ mode: "auto" }, { mode: "chrome" }, { targetUrl }, { prepareManaged: async () => assert.fail("unexpected managed browser") }]) {
+    await assert.rejects(prepareSecretBrowserSession({ ...args, ...unsafe }), error =>
+      error.preflight && error.reasonCode === "target_url_changed");
+  }
+  assert.deepEqual(f.requests, []);
+  const session = await prepareSecretBrowserSession(args);
+  assert.equal(session.application, "client");
+  assert.deepEqual(f.requests, [{ command: "prepare", clientFamily: "codex", steps: [{
+    targetOrigin: args.context.targetOrigin, targetUrlSha256, fields: [{ fieldKey: "totp", id: "code" }],
+  }] }]);
+  const changed = structuredClone(args.context);
+  delete changed.browserSteps[0].privateTarget;
+  assert.throws(() => assertBrowserFillBindingUnchanged(args.context, changed), SecretBrowserFillError);
+  assert.deepEqual(await session.fill({ secretValues: { totp: "123456" } }), { outcome: "succeeded" });
+  assert.deepEqual(f.requests[1], { command: "fill", values: { totp: "123456" } });
+  await session.close();
+  assert.equal(f.chromePreflights, 0);
+  assert.doesNotMatch(JSON.stringify(f.requests), /PRIVATE_ADDRESS_CANARY|\/verify/u);
+});
+
 test("quoted name selectors select DOM before any native helper or value delivery", async () => {
   const f = fixture();
   f.args.context.browserSteps[0].fields = [

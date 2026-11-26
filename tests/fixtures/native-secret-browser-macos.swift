@@ -149,6 +149,14 @@ do {
     preconditionFailure("No candidate with an allowed bundle identifier")
 } catch Stop.unavailable("application_unavailable") {}
 
+// A private query is part of the exact SHA-256 binding. A document at the
+// same path and origin after a new challenge cannot satisfy the old grant.
+let challengeAddress = "https://bank.example.test/verify?step=placeholder&flow=second"
+let challengeDigest = SHA256.hash(data: Data(challengeAddress.utf8)).map { String(format: "%02x", $0) }.joined()
+precondition(matchesTarget(challengeAddress, "https://bank.example.test", challengeDigest))
+precondition(!matchesTarget("https://bank.example.test/verify", "https://bank.example.test", challengeDigest))
+precondition(!matchesTarget(challengeAddress + "0", "https://bank.example.test", challengeDigest))
+
 // Discovery must inspect document metadata without walking unrelated page
 // contents. A normal Chrome window can expose a much larger web tree than the
 // bank form; that tree must not consume the form's native traversal allowance.
