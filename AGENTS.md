@@ -1824,8 +1824,8 @@ Exact legacy template bytes для распознавания при мигра�
   aliases. Unsupported operation возвращает безопасный recovery к exact
   `action.arguments` до registry/process access; произвольный вход не отражается.
   Подсказки добавляются только ошибкам, а обычный context budget не увеличивается.
-- Cross-repository tests используют реальный plugin checkout через
-  `TRELIO_AGENT_WORKSPACES_PLUGIN_ROOT`. CI checkout является read-only input и
+- Cross-repository tests используют реальный plugin checkout.
+  CI checkout является read-only input и
   не попадает в package. При независимом выпуске оболочки проверяй текущий и
   исторический manifest по [контракту CI](docs/runtime-ci.md#exact-tag-verification).
 - Search discovery и ordinary list/refinement имеют разные корпуса. Matching,
@@ -1965,9 +1965,10 @@ Exact legacy template bytes для распознавания при мигра�
   removal in the builder's shared source layout. Keep the 100-file bound and
   the behavior/consumer checks independent.
 - Search pacing parity executes the actual provider controllers from one immutable public revision; all CI lanes pin that same source, and controller names follow its declared API. Never skip parity or copy snippets after provider drift.
-- Cross-repository tests и `git:integrate` запускай с exact plugin root через
-  `TRELIO_AGENT_WORKSPACES_PLUGIN_ROOT`; worker наследует эту переменную. Missing
-  checkout – setup failure, не повод копировать plugin source.
+- `git:integrate` сам находит соседний plugin checkout от канонического main.
+  Для отдельной ветки или прямого запуска проверок из task worktree передавай
+  `TRELIO_AGENT_WORKSPACES_PLUGIN_ROOT`. Неверный override отклоняется до тестов
+  интеграции. [Контракт](docs/runtime-ci.md#runtime-checks).
 - Перед commit проверь `git diff --check`, полный diff и clean status после commit.
   New host test files must enter both generic and applicable Windows direct CI lanes; the suite-inventory guard must remain strict.
   Scheduled recovery exercises both the signed transport and checkpoint carry on Linux, macOS and Windows. Run both suites when changing either side of this handoff.

@@ -104,6 +104,17 @@ Both macOS matrices use the hosted `macos-15-intel` pool. All native checks,
 platform-specific security assertions and Windows artifacts are part of release
 evidence. The release uses the exact tested commit.
 
+For ordinary local integration, the selected candidate suites that import
+`tests/test-layout.mjs` directly or through test helpers require a plugin
+checkout. Before running tests or preparing their dependencies, the gate
+validates the plugin manifest and launcher. It looks for the `agent-workspaces`
+checkout beside the registered canonical runtime checkout, including when the
+task worktree is in a temporary directory. Set
+`TRELIO_AGENT_WORKSPACES_PLUGIN_ROOT` to the exact plugin directory or its
+repository root to test a separate checkout. An invalid override fails before
+running suites. Other local plans need no plugin checkout. Hosted workflow
+jobs still set the exact plugin directory in their own checkout.
+
 Cross-repository checks read the plugin checkout separately. The shell
 manifest assertions cover the current Code Mode registrations, the 3.3.0
 local MCP exception and the older hook registrations. Runtime release precedes

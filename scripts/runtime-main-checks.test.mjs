@@ -67,6 +67,15 @@ test('test helper imports and fixture URLs select the real consumer without runt
   assert.deepEqual(plan(['tests/fixtures/helper.mjs'], files).tests, ['tests/rows.test.mjs']);
 });
 
+test('only selected candidate suites require the plugin checkout', () => {
+  const suite = 'tests/plugin.test.mjs';
+  const before = snapshot({...source, [suite]: "import './test-layout.mjs';", 'tests/test-layout.mjs': 'export {};'});
+  assert.equal(plan([module], before).requiresPluginCheckout, false);
+  assert.equal(plan([suite], before).requiresPluginCheckout, true);
+  const after = new Map(before).set(suite, 'export {};');
+  assert.equal(plan([suite], before, after).requiresPluginCheckout, false);
+});
+
 test('text readers do not inherit imports of the source they inspect', () => {
   const files = snapshot({...source,
     'tests/text-only.test.mjs': "readFile(new URL('../host-runtime/scripts/consumer.mjs', import.meta.url));",
@@ -77,7 +86,8 @@ test('text readers do not inherit imports of the source they inspect', () => {
 
 test('maintainer prose and ignore policy need only diff checks; changed tests run once', () => {
   assert.deepEqual(plan(['AGENTS.md', 'docs/runtime-ci.md', 'SECURITY.md', '.gitignore'], snapshot({})),
-    {syntax: [], tests: [], dependencies: false, testPackages: [], coordination: false, reasons: {}});
+    {syntax: [], tests: [], dependencies: false, testPackages: [], coordination: false,
+      requiresPluginCheckout: false, reasons: {}});
   const result = plan([unit, module], snapshot(source));
   assert.deepEqual(result.tests, [consumerTest, unit]);
   assert.deepEqual(result.testPackages, []);
@@ -235,9 +245,11 @@ test('nested npm projects follow their suites and both manifests select their co
 // Exercise the real planner -> dependency preflight -> sequential runner, not
 // a copied executor or a fabricated receipt. This repository is wholly owned
 // by the fixture; no runtime/client/private state or remote push is involved.
-function mainCliFixture(t) {
-  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'runtime-main-cli-'));
-  t.after(() => fs.rmSync(directory, {recursive: true, force: true}));
+function mainCliFixture(t, name = '') {
+  const parent = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'runtime-main-cli-')));
+  const directory = path.join(parent, name);
+  fs.mkdirSync(directory, {recursive: true});
+  t.after(() => fs.rmSync(parent, {recursive: true, force: true}));
   const git = (...args) => {
     const result = spawnSync('git', ['-C', directory, ...args], {encoding: 'utf8'});
     assert.equal(result.status, 0, result.stderr); return result.stdout.trim();
@@ -250,11 +262,71 @@ function mainCliFixture(t) {
   write('package.json', JSON.stringify({private: true, scripts: {'check:dependencies': 'node scripts/dependencies.mjs'}}));
   write('scripts/dependencies.mjs', "import fs from 'node:fs'; fs.writeFileSync('.dependencies-ran', 'yes');");
   write(module, 'export const value = 1;');
-  const invoke = (base, head, env = process.env) =>
+  const invoke = (base, head, env = process.env, cwd = directory) =>
     spawnSync(process.execPath, [path.join(root, 'scripts/runtime-main-checks.mjs'), base, head],
-      {cwd: directory, encoding: 'utf8', env, timeout: 20_000});
+      {cwd, encoding: 'utf8', env, timeout: 20_000});
   return {directory, git, write, commit, marker, invoke};
 }
+
+test('local checks resolve the plugin from a linked worktree and validate explicit paths before running suites', t => {
+  const {directory, git, write, commit, invoke} = mainCliFixture(t, 'agent-workspaces-runtime');
+  const policy = fs.readFileSync(path.join(root, 'git-coordination.json'), 'utf8');
+  write('git-coordination.json', policy);
+  git('config', '--local', JSON.parse(policy).canonicalKey, directory);
+  write('tests/test-layout.mjs', 'export const pluginDirectory = process.env.TRELIO_AGENT_WORKSPACES_PLUGIN_ROOT;');
+  write('tests/fixtures/plugin.mjs', "export {pluginDirectory} from '../test-layout.mjs';");
+  write('tests/plugin.test.mjs', `import '../${module}'; import fs from 'node:fs';
+    import {pluginDirectory} from './fixtures/plugin.mjs';
+    fs.writeFileSync('.plugin-root', pluginDirectory);`);
+  const base = commit();
+  git('update-ref', 'refs/remotes/origin/main', base);
+  write(module, 'export const value = 2;');
+  const head = commit();
+  const parent = path.dirname(directory);
+  const worktree = path.join(parent, 'worktrees', 'task checkout');
+  fs.mkdirSync(path.dirname(worktree));
+  git('worktree', 'add', '--detach', worktree, head);
+  const env = {...process.env};
+  const variable = 'TRELIO_AGENT_WORKSPACES_PLUGIN_ROOT';
+  delete env[variable];
+  const sibling = path.join(parent, 'agent-workspaces');
+  const selectedRoot = path.join(worktree, '.plugin-root');
+  const dependencies = path.join(worktree, '.dependencies-ran');
+
+  const missing = invoke(base, head, env, worktree);
+  assert.equal(missing.status, 1, missing.stderr);
+  assert.match(missing.stderr, /TRELIO_AGENT_WORKSPACES_PLUGIN_ROOT/u);
+  assert.equal(fs.existsSync(dependencies), false);
+
+  function writePlugin(checkout) {
+    const plugin = path.join(checkout, 'plugins', 'trelio-agent-workspaces');
+    fs.mkdirSync(path.join(plugin, '.claude-plugin'), {recursive: true});
+    fs.mkdirSync(path.join(plugin, 'scripts'), {recursive: true});
+    fs.writeFileSync(path.join(plugin, '.claude-plugin', 'plugin.json'), '{"name":"trelio-agent-workspaces"}');
+    fs.writeFileSync(path.join(plugin, 'scripts', 'launch-trelio-node'), '');
+    return plugin;
+  }
+  const siblingPlugin = writePlugin(sibling);
+  const automatic = invoke(base, head, env, worktree);
+  assert.equal(automatic.status, 0, automatic.stderr);
+  assert.equal(fs.readFileSync(selectedRoot, 'utf8'), siblingPlugin);
+
+  const explicit = path.join(parent, 'plugin checkout with spaces');
+  const explicitPlugin = writePlugin(explicit);
+  for (const providedPath of [explicit, explicitPlugin]) {
+    const result = invoke(base, head, {...env, [variable]: providedPath}, worktree);
+    assert.equal(result.status, 0, result.stderr);
+    assert.equal(fs.readFileSync(selectedRoot, 'utf8'), explicitPlugin);
+  }
+
+  fs.unlinkSync(selectedRoot);
+  fs.unlinkSync(dependencies);
+  const invalid = invoke(base, head, {...env, [variable]: path.join(parent, 'missing override')}, worktree);
+  assert.equal(invalid.status, 1, invalid.stderr);
+  assert.match(invalid.stderr, /Invalid TRELIO_AGENT_WORKSPACES_PLUGIN_ROOT/u);
+  assert.equal(fs.existsSync(dependencies), false);
+  assert.equal(fs.existsSync(selectedRoot), false);
+});
 
 test('real main CLI prepares a cold nested package before any suite and stops on a missing lock', t => {
   const {directory, git, write, commit, marker, invoke} = mainCliFixture(t);

@@ -1,12 +1,16 @@
 import {spawnSync} from 'node:child_process';
+import fs from 'node:fs';
 import path from 'node:path';
 import {fileURLToPath} from 'node:url';
-import {read} from './git-coordinator.mjs';
+import {policy, read} from './git-coordinator.mjs';
 import {readRuntimeCiPlan} from './runtime-ci-plan.mjs';
 import {prepareWindowsWorkerForLocalChecks} from './runtime-windows-worker-preflight.mjs';
 import {isHostRuntimePackageInput} from './host-runtime-package-layout.mjs';
 
 const signedChainSuite = 'tests/trelio-hook-signed-chain.test.mjs';
+const pluginLayout = 'tests/test-layout.mjs';
+const pluginRootVariable = 'TRELIO_AGENT_WORKSPACES_PLUGIN_ROOT';
+const pluginName = 'trelio-agent-workspaces';
 
 const isTest = file => /^(?:scripts|tests)\/[^/]+\.test\.mjs$/u.test(file);
 const isJavaScript = file => /\.(?:mjs|js|cjs)$/u.test(file);
@@ -96,9 +100,10 @@ function add(map, key, value) {
   map.get(key).add(value);
 }
 
-function impactGraph(snapshots) {
+function impactGraph(before, after) {
   const executionOwners = new Map(), literalOwners = new Map(), consumers = new Map();
-  for (const snapshot of snapshots) {
+  const pluginSuites = new Set();
+  for (const snapshot of [before, after]) {
     const refs = new Map([...snapshot].filter(([, text]) => typeof text === 'string')
       .map(([file, text]) => [file, sourceReferences(file, text)]));
     for (const [file, references] of refs) {
@@ -112,6 +117,9 @@ function impactGraph(snapshots) {
         visited.add(file);
         for (const dependency of refs.get(file)?.imports ?? []) {
           add(executionOwners, dependency, suite);
+          // Historical imports select tests after a change, but only imports
+          // in the candidate require that candidate to have a plugin checkout.
+          if (snapshot === after && dependency === pluginLayout) pluginSuites.add(suite);
           // Test helpers are part of the suite, not a production boundary.
           // Follow them fully, but do not explode through every production
           // import of a large Workspace/assistant entrypoint.
@@ -122,7 +130,7 @@ function impactGraph(snapshots) {
       inspect(suite);
     }
   }
-  return {executionOwners, literalOwners, consumers};
+  return {executionOwners, literalOwners, consumers, pluginSuites};
 }
 
 /** Main is a focused boundary gate, not a claim of full impact coverage.
@@ -134,7 +142,7 @@ function impactGraph(snapshots) {
 export function planMainChecks(paths, {before, after}) {
   const syntax = new Set(), tests = new Set(), reasons = new Map(), unmapped = [];
   let dependencies = false, coordination = false;
-  const graph = impactGraph([before, after]);
+  const graph = impactGraph(before, after);
   const available = suite => typeof after.get(suite) === 'string';
   const select = (suite, reason) => {
     if (!available(suite)) return false;
@@ -230,6 +238,7 @@ export function planMainChecks(paths, {before, after}) {
     testPackages.push(directory);
   }
   return {syntax: [...syntax].sort(), tests: [...tests].sort(), dependencies, testPackages, coordination,
+    requiresPluginCheckout: [...tests].some(suite => graph.pluginSuites.has(suite)),
     reasons: Object.fromEntries([...reasons].sort().map(([suite, values]) => [suite, [...values].sort()]))};
 }
 
@@ -275,9 +284,39 @@ export function readMainCheckSnapshot(repository, revision) {
   return snapshot;
 }
 
-function run(executable, args, cwd) {
+function isPluginRoot(directory) {
+  try {
+    const manifest = JSON.parse(fs.readFileSync(path.join(directory, '.claude-plugin', 'plugin.json'), 'utf8'));
+    return manifest?.name === pluginName && fs.statSync(path.join(directory, 'scripts', 'launch-trelio-node')).isFile();
+  } catch (error) {
+    if (error instanceof SyntaxError || ['ENOENT', 'ENOTDIR', 'EISDIR', 'EACCES', 'EPERM'].includes(error.code)) return false;
+    throw error;
+  }
+}
+
+function resolvePluginCheckout(cwd) {
+  const override = process.env[pluginRootVariable];
+  if (override) {
+    const root = path.resolve(cwd, override);
+    const nested = path.join(root, 'plugins', pluginName);
+    if (isPluginRoot(root)) return root;
+    if (isPluginRoot(nested)) return nested;
+    // An explicit path may select a compatibility branch. Falling back to
+    // the usual sibling here could make the wrong plugin tree pass CI.
+    throw Error(`Invalid ${pluginRootVariable}: ${root}. Set it to the plugin directory or its agent-workspaces checkout.`);
+  }
+  // Integration worktrees often live in TMPDIR. The clone-local registration
+  // used by the coordinator is shared by those worktrees and anchors discovery
+  // to the same canonical checkout on every invocation.
+  const canonical = fs.realpathSync(read('git', ['config', '--local', '--get', policy(cwd).canonicalKey], cwd));
+  const root = path.join(path.dirname(canonical), 'agent-workspaces', 'plugins', pluginName);
+  if (isPluginRoot(root)) return root;
+  throw Error(`Plugin checkout unavailable at ${root}. Set ${pluginRootVariable} to a local agent-workspaces checkout.`);
+}
+
+function run(executable, args, cwd, env = process.env) {
   console.log(`Local check: ${path.basename(executable)} ${args.join(' ')}`);
-  const result = spawnSync(executable, args, {cwd, stdio: 'inherit', shell: false});
+  const result = spawnSync(executable, args, {cwd, env, stdio: 'inherit', shell: false});
   if (result.error || result.status !== 0) throw Error(`Local check failed: ${executable} ${args.join(' ')}`);
 }
 
@@ -290,6 +329,9 @@ async function main([baseSha, headSha, ...extra]) {
   run('git', ['diff', '--check', baseSha, headSha], cwd);
   const plan = planMainChecks(changedPaths, {before: readMainCheckSnapshot(cwd, baseSha), after: readMainCheckSnapshot(cwd, headSha)});
   console.log(JSON.stringify({mainChecks: plan}));
+  const testEnvironment = plan.requiresPluginCheckout
+    ? {...process.env, [pluginRootVariable]: resolvePluginCheckout(cwd)}
+    : process.env;
   if (plan.tests.length || plan.dependencies || plan.coordination) run('npm', ['run', 'check:dependencies'], cwd);
   for (const file of plan.syntax) run(process.execPath, ['--check', file], cwd);
   // Resolve the hosted packaging input before running any affected suites.
@@ -304,7 +346,7 @@ async function main([baseSha, headSha, ...extra]) {
   for (const directory of plan.testPackages) {
     run('npm', ['ci', '--prefix', directory, '--include=dev', '--ignore-scripts', '--prefer-offline', '--no-audit', '--no-fund'], cwd);
   }
-  for (const file of plan.tests) run(file.endsWith('.sh') ? 'bash' : process.execPath, [file], cwd);
+  for (const file of plan.tests) run(file.endsWith('.sh') ? 'bash' : process.execPath, [file], cwd, testEnvironment);
   if (plan.coordination) run('npm', ['run', 'test:git-guard'], cwd);
   console.log(`Local main checks passed for ${headSha}: ${plan.tests.length} affected suites`);
 }
