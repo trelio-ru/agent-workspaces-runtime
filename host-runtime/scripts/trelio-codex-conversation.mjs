@@ -1027,9 +1027,8 @@ const verifyWizardFolderReadiness = async (folderPath, company, { filesystem, on
 };
 
 export const handleCodexConnectionAction = async (origin, input, dependencies = {}) => {
-  if (!object(input) || Object.keys(input).some(key => !["capabilityToken", "action", "settings", "projectId"].includes(key))
-    || !["state", "pick", "save", "connect", "confirm_browser", "presented", "list_projects", "select_project"].includes(input.action)
-    || (input.action === "select_project" ? !safeCodexProjectId(input.projectId) : Object.hasOwn(input, "projectId"))) {
+  if (!object(input) || Object.keys(input).some(key => !["capabilityToken", "action", "settings"].includes(key))
+    || !["state", "pick", "save", "connect", "confirm_browser", "presented", "list_projects", "select_project"].includes(input.action)) {
     throw wizardError("CODEX_CONNECTION_INVALID_INPUT");
   }
   const cap = wizardCapabilities.get(input.capabilityToken);
@@ -1068,13 +1067,18 @@ export const handleCodexConnectionAction = async (origin, input, dependencies = 
       return wizardResult(input.capabilityToken, cap, { ...cap.state, projectChoices: cap.projectChoices });
     }
     if (input.action === "select_project") {
-      const choice = cap.projectChoices?.find(project => project.projectId === input.projectId);
-      if (input.settings !== undefined || !choice) throw wizardError("CODEX_CONNECTION_INVALID_INPUT");
+      // The select action reuses the App-only settings envelope. Its payload
+      // contains only the catalog ID; a client cannot supply its own root.
+      if (!object(input.settings) || Object.keys(input.settings).length !== 1
+        || !safeCodexProjectId(input.settings.projectId)) throw wizardError("CODEX_CONNECTION_INVALID_INPUT");
+      const choice = cap.projectChoices?.find(project => project.projectId === input.settings.projectId);
+      if (!choice) throw wizardError("CODEX_CONNECTION_INVALID_INPUT");
       const verified = await (dependencies.readProjectById ?? readCodexProjectById)(choice.projectId, { signal: dependencies.signal });
       if (verified?.projectId !== choice.projectId || verified.folderPaths.length !== 1
         || verified.folderPaths[0] !== choice.folderPath) throw wizardError("CODEX_CONNECTION_PROJECT_FOLDER_CHANGED");
       cap.project = choice;
       cap.state = { ...cap.state, stage: "folder", selection: "project", folderPath: choice.folderPath, createFolder: false };
+      return wizardResult(input.capabilityToken, cap, cap.state);
     }
     if (input.settings !== undefined) {
       if (!["save", "pick", "connect"].includes(input.action) || !object(input.settings)
@@ -1412,7 +1416,7 @@ function unconfirmed(text) {
   // screen too. Retain the input so reopening/rechecking can reconcile it.
   $('done').hidden = true; $('setup').hidden = false; notice(text, true);
 }
-async function action(kind, settings, projectId) {
+async function action(kind, settings) {
   if (busy || !cap) return;
   var requestCap = cap;
   var focusTarget;
@@ -1424,7 +1428,6 @@ async function action(kind, settings, projectId) {
   try {
     var args = {capabilityToken:requestCap, action:kind};
     if (settings) args.settings = settings;
-    if (projectId) args.projectId = projectId;
     var result = await rpc('tools/call', {name:'codex_connection_app_action', arguments:args});
     // A late response from a superseded card cannot restore an old connection.
     if (requestCap !== cap) return;
@@ -1470,7 +1473,7 @@ $('project-list').onclick = function() {
 };
 $('use-project').onclick = function() {
   var projectId = $('projects').value;
-  if (projectId) return action('select_project', undefined, projectId);
+  if (projectId) return action('select_project', {projectId:projectId});
 };
 // Settings have one explicit local Save. Its pending/error lifecycle is the
 // same as Connect; beforeunload protects only the unsaved local draft.

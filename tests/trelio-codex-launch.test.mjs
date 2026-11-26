@@ -348,12 +348,15 @@ test("a projectless wizard requires an explicit choice and revalidates a listed 
     capabilityToken: meta.capabilityToken, action, ...fields,
   }, dependencies);
   assert.equal((await action("connect")).structuredContent.code, "CODEX_CONNECTION_SELECTION_REQUIRED");
-  assert.equal((await action("select_project", { projectId })).structuredContent.code, "CODEX_CONNECTION_INVALID_INPUT");
+  const selection = { settings: { projectId } };
+  assert.equal((await action("select_project", selection)).structuredContent.code, "CODEX_CONNECTION_INVALID_INPUT");
   const list = await action("list_projects");
   assert.deepEqual(list._meta["trelio/codexConnection"].projectChoices, [{ projectId, name: project.name, folderPath }]);
   assert.ok(!JSON.stringify(list.structuredContent).includes(projectId));
   assert.ok(!JSON.stringify(list.content).includes(folderPath));
-  assert.equal((await action("select_project", { projectId }))._meta["trelio/codexConnection"].selection, "project");
+  assert.equal((await action("select_project", { settings: { projectId, folderPath } })).structuredContent.code,
+    "CODEX_CONNECTION_INVALID_INPUT");
+  assert.equal((await action("select_project", selection))._meta["trelio/codexConnection"].selection, "project");
   project = { ...project, folderPaths: [path.join(fixture.root, "Moved")] };
   assert.equal((await action("connect")).structuredContent.code, "CODEX_CONNECTION_PROJECT_FOLDER_CHANGED");
   assert.equal(fixture.puts, 0);
