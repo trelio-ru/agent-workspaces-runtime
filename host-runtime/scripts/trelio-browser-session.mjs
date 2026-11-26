@@ -1374,7 +1374,7 @@ const loadBrowserController = () => browserControllerImplementation ??= (async (
   ]);
   const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu;
   const hex = /^[0-9a-f]{64}$/u;
-  const MAX_INPUT = 65_536, MAX_RESULT = 8192, MAX_REQUESTS = 128;
+  const MAX_INPUT = 65_536, MAX_RESULT = 8192;
   const validUuid = value => typeof value === 'string' && uuid.test(value);
   const fail = code => { throw Object.assign(new Error(code), { code }); };
   const digest = value => crypto.createHash('sha256').update(JSON.stringify(value)).digest('hex');
@@ -1499,6 +1499,8 @@ const loadBrowserController = () => browserControllerImplementation ??= (async (
       fail('BROWSER_CONTROLLER_DESCRIPTOR_INVALID');
     const monotonicDeadline = performance.now() + original.deadlineAt - Date.now();
     const alive = () => !stopping && Date.now() < original.deadlineAt && performance.now() < monotonicDeadline;
+    // Keep IDs and results until this lease closes so even an early command
+    // can be polled or recognized as a duplicate late in the same session.
     const attempts = new Map(), events = [];
     let queue = Promise.resolve(), stopping = false, sequence = 0, eventBytes = 0, eventOverflow = false;
     let resolveClosed;
@@ -1585,7 +1587,6 @@ const loadBrowserController = () => browserControllerImplementation ??= (async (
         const command = boundedJson(input.command, MAX_INPUT - 1024), hash = digest(command);
         const existing = attempts.get(input.requestId);
         if (existing) { reply({ state: existing.hash === hash ? existing.state : 'request_conflict' }); return; }
-        if (attempts.size >= MAX_REQUESTS) { reply({ state: 'request_limit' }); return; }
         const attempt = { hash, state: 'queued' };
         // Reserve BEFORE enqueue/handler. Duplicate IDs (including a lost HTTP
         // response) observe the old attempt; they can never repeat site input.

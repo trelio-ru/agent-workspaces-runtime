@@ -145,6 +145,47 @@ test('real child caller survives closed terminal stdin, fresh invocation and cwd
   }
 });
 
+test('the same browser controller accepts more than 128 commands and preserves the first result without replay', async () => {
+  const env = environment();
+  const descriptor = await prepareBrowserController({ environment: env });
+  let effects = 0;
+  const controller = await openBrowserController(descriptor, {
+    handle: async () => ({ count: ++effects }),
+    onClose: async () => {},
+  });
+  try {
+    // Exercise the real authenticated command queue for the volume check
+    // without paying for a new native private-file validation per submission.
+    // The child-caller test covers those validations through the host wrapper.
+    const { port, token } = JSON.parse(await fs.readFile(descriptor.ownerFile, 'utf8'));
+    async function submit(requestId, action = 'effect') {
+      const response = await fetch(`http://127.0.0.1:${port}/command`, {
+        method: 'POST', redirect: 'error',
+        headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' },
+        body: JSON.stringify({ operation: 'submit', requestId, command: { action } }),
+      });
+      assert.equal(response.status, 200);
+      return response.json();
+    }
+
+    const firstId = randomUUID();
+    assert.equal((await submit(firstId)).state, 'queued');
+    for (let count = 1; count < 128; count++) {
+      assert.equal((await submit(randomUUID())).state, 'queued');
+    }
+    const laterId = randomUUID();
+    assert.equal((await submit(laterId)).state, 'queued', 'the 129th distinct command must reach the caller');
+    assert.deepEqual(await settled(env, descriptor.sessionId, laterId), { state: 'completed', result: { count: 129 } });
+
+    assert.equal((await submit(firstId)).state, 'completed');
+    assert.equal((await submit(firstId, 'different')).state, 'request_conflict');
+    assert.deepEqual(await settled(env, descriptor.sessionId, firstId), { state: 'completed', result: { count: 1 } });
+    assert.equal(effects, 129);
+  } finally {
+    assert.deepEqual(await controller.close(), { state: 'closed' });
+  }
+});
+
 test('expired original descriptor cannot be claimed or revived by fresh host lease', async () => {
   const home = await fs.mkdtemp(path.join(suiteHome, 'expiry-'));
   const previous = { HOME: process.env.HOME, USERPROFILE: process.env.USERPROFILE, LOCALAPPDATA: process.env.LOCALAPPDATA };

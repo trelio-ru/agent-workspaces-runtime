@@ -1384,8 +1384,10 @@ Handler сериализован; request UUID/payload digest резервиру
 Poll различает queued/running/completed/outcome_unknown/unknown_request.
 Потерянный ответ требует poll прежнего ID и фактического read-back сайта, не
 нового submit. Error handler-а возвращает только outcome_unknown без raw message.
-RAM bounds: 128 attempts без eviction/replay, result до 8 КиБ; 64 события
-по 4 КиБ, суммарно до 256 КиБ. Event overflow явный, не отменяет/повторяет auth.
+Число команд в действующей сессии не ограничено. Request ID, хеши и результаты
+остаются в RAM до закрытия сессии, чтобы ранние команды по-прежнему можно было
+проверять через poll и исключить их повторное исполнение. Результат до 8 КиБ;
+64 события по 4 КиБ, суммарно до 256 КиБ. Event overflow явный, не отменяет/повторяет auth.
 Status возвращает bounded страницу ленты с nextSequence, без потребляющего ACK.
 Продолжение – status --after-sequence nextSequence до sequence. Result и каждая
 страница измеряются SAME final skill_run stdout/text MCP builder с escaping:
