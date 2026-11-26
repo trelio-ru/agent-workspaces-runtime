@@ -6,6 +6,14 @@ import Foundation
 import CoreFoundation
 import CoreGraphics
 import CryptoKit
+import Security
+
+// Simulated process inventory for the production admission loop. Requirement
+// parsing remains Apple's implementation; only the live PID check is stubbed.
+struct NSRunningApplication {
+    let bundleIdentifier: String?
+    let validSignature: Bool
+}
 
 final class FixtureElement: NSObject {
     let role: String
@@ -121,6 +129,25 @@ for family in ["codex", "claude-code"] {
 }
 do { _ = try Session.applicationIdentities("other"); preconditionFailure("Unknown client admitted") }
 catch Stop.unavailable("client_unsupported") {}
+
+// A stale Chrome signature must not block the actual Codex destination.
+let codexIdentities = try Session.applicationIdentities("codex")
+let rejectedChrome = NSRunningApplication(bundleIdentifier: "com.google.Chrome", validSignature: false)
+let signedCodex = NSRunningApplication(bundleIdentifier: "com.openai.codex", validSignature: true)
+let signedChrome = NSRunningApplication(bundleIdentifier: "com.google.Chrome", validSignature: true)
+let unrelated = NSRunningApplication(bundleIdentifier: "com.example.browser", validSignature: true)
+let admittedCodex = try Session.verifiedApplications([rejectedChrome, signedCodex, unrelated], identities: codexIdentities)
+precondition(admittedCodex.map { $0.application.bundleIdentifier } == ["com.openai.codex"])
+let admittedBoth = try Session.verifiedApplications([rejectedChrome, signedCodex, signedChrome], identities: codexIdentities)
+precondition(admittedBoth.map { $0.chrome } == [false, true])
+do {
+    _ = try Session.verifiedApplications([rejectedChrome, unrelated], identities: codexIdentities)
+    preconditionFailure("No verified running application")
+} catch Stop.failed("adapter_error") {}
+do {
+    _ = try Session.verifiedApplications([unrelated], identities: codexIdentities)
+    preconditionFailure("No candidate with an allowed bundle identifier")
+} catch Stop.unavailable("application_unavailable") {}
 
 // Discovery must inspect document metadata without walking unrelated page
 // contents. A normal Chrome window can expose a much larger web tree than the

@@ -467,6 +467,32 @@ final class Session {
         default: throw Stop.unavailable("client_unsupported")
         }
     }
+    static func verifiedApplications(
+        _ running: [NSRunningApplication], identities: [(String, String)]
+    ) throws -> [(application: NSRunningApplication, requirement: SecRequirement, chrome: Bool)] {
+        let candidates = running.compactMap { app in
+            identities.first(where: { $0.0 == app.bundleIdentifier }).map { (app, $0) }
+        }
+        guard !candidates.isEmpty else { throw Stop.unavailable("application_unavailable") }
+        let verified: [(application: NSRunningApplication, requirement: SecRequirement, chrome: Bool)] =
+            try candidates.compactMap { app, identity in
+                var parsedRequirement: SecRequirement?
+                let rule = "anchor apple generic and identifier \"" + identity.0 + "\" and certificate leaf[subject.OU] = \"" + identity.1 + "\""
+                guard SecRequirementCreateWithString(rule as CFString, SecCSFlags(), &parsedRequirement) == errSecSuccess,
+                      let requirement = parsedRequirement else { throw Stop.failed("adapter_error") }
+                // A running browser can fail dynamic signature validation after an
+                // on-disk update. Exclude it before creating any AX reference.
+                // It must neither receive values nor veto discovery in another
+                // verified browser. Every verified process still participates in
+                // the same unique-document check.
+                guard Session.trust(app, requirement) else { return nil }
+                return (app, requirement, identity.0 == "com.google.Chrome")
+            }
+        // With no verified process keep the signature rejection terminal,
+        // even for plans that ordinarily allow an isolated Chrome fallback.
+        guard !verified.isEmpty else { throw Stop.failed("adapter_error") }
+        return verified
+    }
     init(_ request: Request) throws {
         lease = try NativeLease()
         guard AXIsProcessTrusted() else { throw Stop.unavailable("access_required") }
@@ -474,21 +500,11 @@ final class Session {
         guard let steps = request.steps, !steps.isEmpty, steps.count <= 10,
               steps.allSatisfy({ !$0.fields.isEmpty && $0.fields.count <= 50 }) else { throw Stop.failed("adapter_error") }
         self.steps = steps
-        let applications = NSWorkspace.shared.runningApplications.filter { app in
-            identities.contains(where: { $0.0 == app.bundleIdentifier })
-        }
-        guard !applications.isEmpty else { throw Stop.unavailable("application_unavailable") }
+        let applications = try Session.verifiedApplications(NSWorkspace.shared.runningApplications, identities: identities)
         var verified: [(application: NSRunningApplication, ax: AXUIElement, requirement: SecRequirement, chrome: Bool)] = []
-        for app in applications {
-            guard let identity = identities.first(where: { $0.0 == app.bundleIdentifier }) else { throw Stop.failed("adapter_error") }
-            var parsedRequirement: SecRequirement?
-            let rule = "anchor apple generic and identifier \"" + identity.0 + "\" and certificate leaf[subject.OU] = \"" + identity.1 + "\""
-            guard SecRequirementCreateWithString(rule as CFString, SecCSFlags(), &parsedRequirement) == errSecSuccess,
-                  let requirement = parsedRequirement else { throw Stop.failed("adapter_error") }
-            guard Session.trust(app, requirement) else { throw Stop.failed("adapter_error") }
+        for (app, requirement, chrome) in applications {
             let ax = AXUIElementCreateApplication(app.processIdentifier)
             AXUIElementSetMessagingTimeout(ax, 1)
-            let chrome = identity.0 == "com.google.Chrome"
             if chrome {
                 // Chrome lazily initializes native accessibility on AXRole
                 // reads of its application. Request that before enumerating

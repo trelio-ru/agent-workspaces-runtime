@@ -762,6 +762,7 @@ test("macOS production resolver binds explicit nested documents and rejects stal
       section("func matchesTarget(", "func belongs("),
       section("func matchesField(", "final class Session {"),
       "final class Session {",
+      "static func trust(_ app: NSRunningApplication, _ requirement: SecRequirement) -> Bool { return app.validSignature }",
       section("    static func documents(", "    init(_ request: Request) throws {"),
       "}",
     ].join("\n"));
