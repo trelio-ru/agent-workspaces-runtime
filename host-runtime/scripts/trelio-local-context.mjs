@@ -3995,6 +3995,10 @@ const buildWorkspaceRecord = async ({
   const binding = { workspaceId: workspace.id, acceptedHead: workspace.acceptedHead };
   const cached = await searchCache?.readWorkspace?.(binding);
   if (cached !== null && cached !== undefined) return { ...workspace, documents: cached };
+  // Managed assistants pass an opaque credential binding through the same
+  // mirror builder. The optional inventory is only for a paired human bridge.
+  const includeSearchFileInventory = currentWorkspaceExecutionProfile()?.kind !== "digital_assistant"
+    && typeof token === "string" && token.startsWith("twb_");
   const documents = await readEncryptedWorkspaceSearchDocuments({
     origin,
     token,
@@ -4002,7 +4006,7 @@ const buildWorkspaceRecord = async ({
     workspaceId: workspace.id,
     acceptedHead: workspace.acceptedHead,
     previousWorkspace,
-    includeSearchFileInventory: token.startsWith("twb_") && currentWorkspaceExecutionProfile()?.kind !== "digital_assistant",
+    includeSearchFileInventory,
     signal,
     searchCache,
     readSource,

@@ -155,9 +155,12 @@ export const startCompanyScenarioBackend=async({identity,pass,credential,runtime
       }
       if(selected.pathname.endsWith(`/workspaces/${workspaceId}`)){
         counts.builds++;
+        assert.equal(request.headers['x-trelio-search-file-inventory'],undefined);
         if(refuse){json(response,{code:unknownCode?'SYNTHETIC_PRIVATE_REFUSAL_CANARY':'ACCESS_DENIED',message:'SYNTHETIC_PRIVATE_REFUSAL_CANARY'},403);return;}
+        // The ordinary v2 descriptor advertises batches even on the managed
+        // route. Only a paired human can actually use the batch transport.
         json(response,{schemaVersion:1,encryptedPayloads:[],context:{company,workspace:{id:workspaceId,acceptedHead:workspaceHead},
-          encryption:{browserProjection:{id:projectionId,manifestFileId,workspaceHead,fileCount}}}});return;
+          encryption:{browserProjection:{id:projectionId,manifestFileId,workspaceHead,fileCount,searchFileBatchVersion:1}}}});return;
       }
       if(selected.pathname.endsWith(`/company-context/${company.slug}/manifest`)){
         if(lastNativeTool==='fetch')counts.fetchManifestReads++;

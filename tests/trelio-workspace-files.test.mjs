@@ -6,7 +6,8 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { createAgentEncryptionDevice, encryptFileToCompanyContainer } from "../host-runtime/scripts/trelio-company-encryption.mjs";
-import { readEncryptedWorkspaceFileManifest, readEncryptedWorkspaceSearchChunks, readEncryptedWorkspaceSelectedFile, validateWorkspaceFileLocator, workspaceFileLocatorFromResultId } from "../host-runtime/scripts/trelio-workspace-files.mjs";
+import { readEncryptedWorkspaceFileManifest, readEncryptedWorkspaceSearchChunks, readEncryptedWorkspaceSearchFileBatch,
+  readEncryptedWorkspaceSelectedFile, validateWorkspaceFileLocator, workspaceFileLocatorFromResultId } from "../host-runtime/scripts/trelio-workspace-files.mjs";
 import { matchWorkspaceTextChunks } from "../host-runtime/scripts/trelio-workspace-text-chunks.mjs";
 import { createEncryptedSearchFileCache, handleNativeLocalContextRead, searchCompanyContextMirror, syncCompanyContextMirror, resolveMirrorPaths } from "../host-runtime/scripts/trelio-local-context.mjs";
 import { readEncryptedWorkspaceSearchDocuments, resolveWorkspaceBridgeConfigDirectory, resolveCompanyContextMirrorDirectory,
@@ -476,6 +477,7 @@ test("fresh encrypted search inventory reuses 99 unchanged files across heads an
   await useHead("a", original);
   const downloaded = [];
   let canReadWorkspace = true;
+  let mismatchedReceiptId;
   const server = createServer((request, response) => {
     const json = data => response.setHeader("content-type", "application/json").end(JSON.stringify(data));
     if (request.url === "/api/agent-workspaces/company-context/synthetic/manifest") {
@@ -493,8 +495,23 @@ test("fresh encrypted search inventory reuses 99 unchanged files across heads an
         browserProjection: { id: current.projectionId, manifestFileId: current.manifestFileId,
           workspaceHead: current.head, fileCount: current.count },
         searchFileInventory: { projectionId: current.projectionId, scopeId, scopeEpoch: 1,
-          files: current.accepted.map(file => [file.id, containers.get(file.id).digest, file.sizeBytes]) },
+          files: current.accepted.map(file => [file.id, file.id === mismatchedReceiptId
+            ? "0".repeat(64) : containers.get(file.id).digest, file.sizeBytes]) },
       } });
+    }
+    const batch = new URL(request.url, "http://localhost");
+    if (batch.pathname === `/api/agent-workspaces/workspaces/${workspaceId}/encrypted-search-files`) {
+      assert.equal(batch.searchParams.get("head"), current.head);
+      assert.equal(batch.searchParams.get("projectionId"), current.projectionId);
+      const frames = batch.searchParams.get("files").split(",").map(id => {
+        assert.ok(current.accepted.some(file => file.id === id));
+        return { id, ...containers.get(id) };
+      });
+      const header = Buffer.from(JSON.stringify(frames.map(({ id, bytes, digest }) => ({ id, size: bytes.length, digest }))));
+      const length = Buffer.alloc(4);
+      length.writeUInt32BE(header.length);
+      return response.setHeader("x-trelio-workspace-id", workspaceId)
+        .setHeader("x-trelio-workspace-head", current.head).end(Buffer.concat([length, header, ...frames.map(frame => frame.bytes)]));
     }
     const id = /\/files\/([^/]+)\/encrypted-content$/u.exec(request.url)?.[1];
     const object = containers.get(id);
@@ -518,6 +535,16 @@ test("fresh encrypted search inventory reuses 99 unchanged files across heads an
     const first = await sync();
     assert.equal(first.mirror.workspaces[0].documents.length, 100);
     assert.equal(downloaded.length, 100);
+    const batchInput = { origin, token: "twb_synthetic", companyEncryption, workspaceId,
+      workspaceHead: current.head, includeSearchFileInventory: true };
+    const readBatch = async () => readEncryptedWorkspaceSearchFileBatch(batchInput, current.projectionId,
+      (await readEncryptedWorkspaceFileManifest(batchInput)).slice(0, 2));
+    assert.equal((await readBatch()).length, 2);
+    // The batch bytes and their own digests are valid. Only the independent
+    // accepted receipt differs, so nothing can be indexed under that receipt.
+    mismatchedReceiptId = original[0].id;
+    await assert.rejects(readBatch(), { code: "WORKSPACE_FILE_ENCRYPTION_BINDING_INVALID" });
+    mismatchedReceiptId = undefined;
     downloaded.length = 0;
     const nextFiles = [updated, ...original.slice(1)];
     await useHead("b", nextFiles);

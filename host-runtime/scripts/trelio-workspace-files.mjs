@@ -387,6 +387,10 @@ export const readEncryptedWorkspaceSearchFileBatch = async (input, projectionId,
       if (entry?.id !== file.id || !Number.isSafeInteger(entry.size) || entry.size <= 0
         || entry.size > MAX_BATCH_CIPHERTEXT_PER_FILE || offset + entry.size > bytes.length
         || !/^[a-f0-9]{64}$/u.test(String(entry.digest))) fail("WORKSPACE_FILE_BATCH_INVALID");
+      // Cache proof comes from the exact overview. A batch frame must agree
+      // with it before any chunks can be indexed under that proof.
+      const expectedDigest = verifiedWorkspaceSearchCiphertextDigest(file);
+      if (expectedDigest && entry.digest !== expectedDigest) fail("WORKSPACE_FILE_ENCRYPTION_BINDING_INVALID");
       const ciphertext = bytes.subarray(offset, offset + entry.size);
       offset += entry.size;
       return { ciphertext, digest: entry.digest };

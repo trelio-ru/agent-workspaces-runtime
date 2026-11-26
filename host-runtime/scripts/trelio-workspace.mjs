@@ -15723,7 +15723,9 @@ export const readEncryptedWorkspaceSearchDocuments = async (input) => {
   try {
     files = await readSource(() => readEncryptedWorkspaceFileManifest(requestInput, {
       onSearchBatchProjection: id => {
-        if (input.token.startsWith("twb_") && !currentWorkspaceExecutionProfile()) batchProjectionId = id;
+        if (!currentWorkspaceExecutionProfile() && typeof input.token === "string" && input.token.startsWith("twb_")) {
+          batchProjectionId = id;
+        }
       },
     }));
   }
