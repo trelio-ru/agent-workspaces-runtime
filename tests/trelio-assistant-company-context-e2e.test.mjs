@@ -46,14 +46,15 @@ for(const scenario of [
       if(process.platform==='darwin'){
         await execute('/usr/bin/security',['create-keychain','-p','synthetic-fixture-only',keychain]);
         stage='unlock_keychain';await execute('/usr/bin/security',['unlock-keychain','-p','synthetic-fixture-only',keychain]);
-        // An isolated HOME starts without a compiled Swift helper. Prepare it
-        // once in a separate fixture stage, as the locked Keychain test does.
-        // This only looks up an empty test slot: the child must still make
-        // every native write/read-back under the original production deadlines.
+        // An isolated HOME starts without a compiled Swift helper. Give the
+        // real compiler a separate fixture budget on cold hosted Intel runners.
+        // The empty-slot read still verifies the disposable Keychain, and the
+        // native child uses the original write and read-back deadlines.
         stage='prepare_keychain_helper';
         const bridge=new URL('../host-runtime/scripts/trelio-workspace.mjs',import.meta.url).href;
         const prepared=await execute(process.execPath,['--input-type=module','--eval',
-          `import {getMacosPrivateKeychainValue} from ${JSON.stringify(bridge)};
+          `import {getMacosPrivateKeychainValue,resolveMacosBridgeKeychainHelper} from ${JSON.stringify(bridge)};
+          await resolveMacosBridgeKeychainHelper({timeoutMs:60_000});
           const value=await getMacosPrivateKeychainValue('ru.trelio.test.owner-company-fixture','helper-preflight');
           if(value!==null)process.exitCode=1;`],
         {env:{...env,NODE_TEST_CONTEXT:'child-v8'},timeout:90_000,maxBuffer:64*1024});

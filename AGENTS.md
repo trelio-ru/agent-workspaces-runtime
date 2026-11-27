@@ -1260,9 +1260,10 @@ publication tooling также остаются вне этого публичн
   CODEX_HOME не отделяет hook journal. Проверяй настоящий writer в fixture-очереди
   с cleanup; stdio collector не должен читать рабочий журнал/credential.
   Native locked-Keychain and owner-company composition fixtures prepare the
-  real helper with one empty-slot read in their isolated HOME before timing
-  lookup or private-session seed. Cold compilation remains covered by the
-  separate migration/rebuild fixture; never relax production deadlines.
+  real helper in their isolated HOME and check an empty slot before timing
+  lookup or private-session seed. Owner-company preflight gives the real
+  compiler a separate test budget. Cold compilation remains covered by the
+  migration/rebuild fixture; never relax production deadlines.
 - `search` возвращает материалы по категориям, `guidance` для правил/процедур и отдельный `skills`; matching и
   projection генерируются из backend pure module через
   `scripts/build-agent-guidance-search.mjs --runtime-root <checkout>`.
