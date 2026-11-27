@@ -516,9 +516,18 @@ const run = {id: 5, run_attempt: 2, head_sha: ${JSON.stringify(sha)}, event: 'pu
 let result;
 if (endpoint.includes('/workflows/')) result = {total_count: s.mode === 'missing' ? 0 : 1,
   workflow_runs: s.mode === 'missing' ? [] : [run]};
-else if (endpoint.includes('/jobs?')) result = {total_count: 1, jobs: [{id: 9, run_id: 5,
-  run_attempt: 2, head_sha: run.head_sha, name: 'Required', status: 'completed',
-  conclusion: 'success', runner_group_name: 'GitHub Actions'}]};
+else if (endpoint.includes('/jobs?')) {
+  const params = new URLSearchParams(endpoint.split('?')[1]);
+  if (params.get('per_page') !== '25') process.exit(92);
+  const page = Number(params.get('page'));
+  // The required job comes on the second page. A partial inventory must not
+  // substitute for the complete exact attempt, even if the workflow is green.
+  const jobs = Array.from({length: 26}, (_, index) => ({id: 9 + index, run_id: 5,
+    run_attempt: 2, head_sha: run.head_sha, name: index === 25 ? 'Required' : 'Other ' + index,
+    status: 'completed', conclusion: 'success', runner_group_name: 'GitHub Actions'}));
+  result = {total_count: jobs.length,
+    jobs: s.mode === 'truncated-jobs' && page === 2 ? [] : jobs.slice((page - 1) * 25, page * 25)};
+}
 else if (endpoint.endsWith('/actions/runs/5')) result = run;
 else process.exit(91);
 process.stdout.write(JSON.stringify(result));
@@ -536,6 +545,8 @@ process.stdout.write(JSON.stringify(result));
       fs.writeFileSync(state, JSON.stringify({mode}));
       await assert.rejects(verify(), mode === 'missing' ? /incomplete/ : /gate failed/);
     }
+    fs.writeFileSync(state, JSON.stringify({mode: 'truncated-jobs'}));
+    await assert.rejects(verify(), /Truncated hosted pagination/);
     assert.equal(validated, 1, 'main equality cannot substitute for successful evidence');
   } finally { process.env.PATH = originalPath; }
 });

@@ -64,6 +64,11 @@ source. For releases, the verifier recomputes the full plan and checks every
 required OS job and attempt before permitting transport. A new failed attempt never reuses an
 older green run. No test runner or VM is started as a fallback by this package.
 
+Hosted verification reads jobs in pages of 25 because large job and step
+inventories can fail as a single GitHub response. Every job still has to
+belong to the exact successful attempt, and truncated or duplicate inventories
+fail verification.
+
 `npm run git:integrate -- --status` reads retained tickets.
 `npm run git:integrate -- --status TICKET` returns one JSON observation, including
 a retained terminal result. `waiting`, `running` and `verified` are active states;

@@ -1916,6 +1916,7 @@ Exact legacy template bytes для распознавания при мигра�
   Shell transport retries only natural live-FIFO mutex acquisition under one fixed bound; never delete an unchanged dead/foreign claim, borrow authority or replay a push.
   Правила версии, восстановления и общего maintainer dependency –
   [контракт координации](docs/git-coordination.md).
+  GitHub jobs читаются страницами по 25, с проверкой полного exact attempt.
   В Codex обычная задача: `npm run git:integrate -- --finish-worktree`.
   В macOS Codex launcher до worker сохраняет сопровождение исходного чата через
   общий maintainer LaunchAgent. После durable admission и chatFollowUp укажи

@@ -31,13 +31,18 @@ export function validateJobs(run, pages, names) {
   return jobs;
 }
 async function pages(cwd, endpoint, key) {
+  // Job inventories contain full step arrays. Large workflow matrices can
+  // trigger GitHub 502 responses for pages of 100 even after a successful run.
+  // Read smaller job pages and retain the original 2,000-entry safety bound.
+  const pageSize = key === 'jobs' ? 25 : 100;
+  const maximumPageCount = 2_000 / pageSize;
   const result = [];
-  for (let page = 1; page <= 20; page++) {
-    const value = api(cwd, `${endpoint}${endpoint.includes('?') ? '&' : '?'}per_page=100&page=${page}`);
+  for (let page = 1; page <= maximumPageCount; page++) {
+    const value = api(cwd, `${endpoint}${endpoint.includes('?') ? '&' : '?'}per_page=${pageSize}&page=${page}`);
     if (!Array.isArray(value[key]) || !Number.isSafeInteger(value.total_count)) throw Error('Incomplete hosted pagination');
     result.push(value);
     if (result.flatMap(item => item[key]).length === value.total_count) return result;
-    if (value[key].length < 100) throw Error('Truncated hosted pagination');
+    if (value[key].length < pageSize) throw Error('Truncated hosted pagination');
   }
   throw Error('Hosted pagination exceeded bound');
 }
