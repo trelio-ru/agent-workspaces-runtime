@@ -1877,6 +1877,10 @@ Exact legacy template bytes для распознавания при мигра�
   Codex wizard capability diagnostics come from its typed local guard.
   See [closed diagnostics](docs/agent-workspace-runtime.md#closed-runtime-diagnostic-details).
 
+- [Signed skill resolve](docs/agent-workspace-runtime.md#signed-skill-resolution)
+  combines admission and release resolution using the existing compatibility
+  handshake. A rejected combined request never switches to the legacy route.
+
 ## Git workflow
 
 - Канонический checkout регистрируется через `npm run git:configure-main` и

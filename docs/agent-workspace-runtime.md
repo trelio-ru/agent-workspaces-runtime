@@ -827,6 +827,17 @@ runtime-версию, а plugin compatibility, Codex retention и Run `clientVer
 shell-версию. Локальная Run/inspection metadata сохраняет оба поля:
 `pluginVersion` и `hostRuntimeVersion`.
 
+### Signed skill resolution
+
+При свежем обычном запуске bridge использует `skillRuntimeResolveVersion: 2`
+из уже выполняемого `/bridge-compatibility`. Один
+`POST /api/agent-skills/runtime/resolve-v2` передаёт координаты релиза и
+опциональный `runtimeSessionId`. Сервер проверяет привязку сессии и политику
+компании до выдачи релиза. Повторное чтение после согласия использует тот же
+маршрут. Ответ без поддержки v2 сохраняет прежние раздельные вызовы, а отказ v2
+останавливает текущий запуск. Допуски из кэша, Remote MCP, выделенные
+ассистенты и одноразовая выдача Agent Secret следуют своим контрактам.
+
 ### Название чата в системном запросе Agent Skill
 
 После успешного admission текущий PreToolUse сохраняет private companion

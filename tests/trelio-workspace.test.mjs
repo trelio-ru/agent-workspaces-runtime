@@ -6555,9 +6555,9 @@ test("plugin exposes folder-first onboarding and delegates local setup decisions
   assert.match(onboardingSkill, /запусти новую\s+`claude` из той же папки/u);
   assert.match(onboardingSkill, /`\/reload-plugins`/u);
 
-  // OAuth, hook trust and company selection remain independent live decisions.
+  // OAuth, the manual trust boundary and company selection stay independent.
+  // The bundled admission test below covers both generations of shell guidance.
   assert.match(onboardingSkill, /Проверь OAuth свежим `list_companies`/u);
-  assert.match(onboardingSkill, /Если сам Trelio\s+вернул `TRELIO_RUNTIME_HOOK_REQUIRED`/u);
   assert.match(onboardingSkill, /Не автоматизируй\s+доверие/u);
   assert.match(onboardingSkill, /явный slug – полное совпадение/u);
   assert.match(onboardingSkill, /display name – единственное точное совпадение/u);
@@ -6741,24 +6741,38 @@ test("bundled skills distinguish missing proof from disabled hook trust", async 
     ),
   ];
 
+  const diagnosticsSkill = await readFile(recoveryFiles[0], "utf8");
+  // Runtime may ship against the existing shell before the new shell is released.
+  // Check the entire bundle against one guidance contract, selected in diagnostics.
+  const currentGuidance = diagnosticsSkill.includes("`TRELIO_RUNTIME_ADMISSION_REJECTED`");
   for (const filePath of recoveryFiles) {
     const instructions = await readFile(filePath, "utf8");
-    assert.match(
-      instructions,
-      /(?:сам\s+Trelio\s+вернул\s+`TRELIO_RUNTIME_HOOK_REQUIRED`|`TRELIO_RUNTIME_HOOK_REQUIRED`\s+от Trelio)/u,
-    );
-    assert.match(instructions, /proof/u);
-    assert.match(instructions, /(?:текущего определения|подтверждённом\s+доверии|просмотр определения не подтверждён)/u);
-    assert.match(instructions, /не повторяй/iu);
-    assert.match(instructions, /владеющ[а-я]+\s+процесс/u);
+    assert.match(instructions, /proof/u, filePath);
+    if (currentGuidance) {
+      assert.match(instructions, /`trelio-runtime` и `trelio-runtime-local`/u, filePath);
+      assert.match(instructions, /`TRELIO_RUNTIME_OBSERVATION_REQUIRED`/u, filePath);
+      assert.match(instructions, /`TRELIO_RUNTIME_ADMISSION_REJECTED`/u, filePath);
+      assert.match(instructions, /`TRELIO_RUNTIME_HOOK_REQUIRED`[^.]{0,110}`reason`/u, filePath);
+      assert.match(instructions, /`reason=missing`[\s\S]{0,150}неподтверждённом/u, filePath);
+      assert.match(instructions, /прежн(?:ий|ем)\s+маршрут/iu, filePath);
+    } else {
+      assert.match(instructions,
+        /(?:сам\s+Trelio\s+вернул\s+`TRELIO_RUNTIME_HOOK_REQUIRED`|`TRELIO_RUNTIME_HOOK_REQUIRED`\s+от Trelio)/u, filePath);
+      assert.match(instructions, /(?:текущего определения|подтверждённом\s+доверии|просмотр определения не подтверждён)/u, filePath);
+      assert.match(instructions, /не повторяй/iu, filePath);
+      assert.match(instructions, /владеющ[а-я]+\s+процесс/u, filePath);
+    }
     assert.match(
       instructions,
       /Ошибка `PreToolUse` доказывает[\s\S]{0,60}(?:запуск|работу|активность|запускался)[\s\S]{0,20}hook|Ошибка `PreToolUse` доказывает, что hook запускался/u,
+      filePath,
     );
-    assert.match(instructions, /AGENT_WORKSPACE_PLUGIN_UPGRADE_REQUIRED/u);
+    assert.match(instructions, /AGENT_WORKSPACE_PLUGIN_UPGRADE_REQUIRED/u, filePath);
+  }
+  if (currentGuidance) {
+    assert.match(diagnosticsSkill, /`liveVerification.hook.state=not_applicable` пропусти\s+проверку Hooks/u);
   }
 
-  const diagnosticsSkill = await readFile(recoveryFiles[0], "utf8");
   const setupRecovery = await readFile(recoveryFiles.at(-1), "utf8");
   for (const instructions of [diagnosticsSkill, setupRecovery]) {
     assert.match(instructions, /0\.154\.0-alpha\.2/u);
@@ -10465,46 +10479,12 @@ test("skill host reuses twelve-hour admission, verifies packages and repairs tam
       if (respondToPlainTestBridgeRouting(request, response)) return;
       if (request.url === "/api/agent-workspaces/bridge-compatibility") {
         response.setHeader("content-type", "application/json");
-        response.end(JSON.stringify(buildTestBridgeCompatibility(request)));
+        response.end(JSON.stringify({ ...buildTestBridgeCompatibility(request), skillRuntimeResolveVersion: 2 }));
         return;
       }
 
-      if (
-        request.method === "POST"
-        && request.url === "/api/agent-workspaces/runtime-policy/admissions"
-      ) {
-        const body = JSON.parse((await readRequestBody(request)).toString("utf8"));
-        assert.equal(body.companyId, companyId);
-        assert.equal(body.runtimeSessionId, runtimeArgv[1]);
-        assert.equal(body.runtimeAttestation, undefined);
-        response.setHeader("content-type", "application/json");
-        // A resumed chat can still retain a descriptor from a finished hook
-        // session. Reject before resolve/package/provider; a later fresh native
-        // declaration uses a different session without restarting this process.
-        if (body.runtimeSessionId === expiredRuntimeSessionId) {
-          admissionRefusals += 1;
-          response.statusCode = 409;
-          response.end(JSON.stringify({ code: "TRELIO_RUNTIME_HOOK_REQUIRED",
-            reason: "expired", expiredCause: "runtime_session_ended",
-            message: "runtime admission expired", token: "PRIVATE_CANARY" }));
-          return;
-        }
-        response.end(JSON.stringify({
-          schemaVersion: 1,
-          company: { id: companyId, slug: "integration-company" },
-          runtimePolicySnapshot: {
-            schemaVersion: 1,
-            revision: null,
-            policy: { schemaVersion: 1, mode: "disabled" },
-          },
-          evaluation: {
-            satisfied: true,
-            enforced: false,
-            reasonCode: "POLICY_DISABLED",
-          },
-        }));
-        return;
-      }
+      assert.notEqual(request.url, "/api/agent-workspaces/runtime-policy/admissions", "v2 requires one resolve request");
+      assert.notEqual(request.url, "/api/agent-skills/runtime/resolve", "v2 refusal cannot fall back to legacy resolve");
 
       if (request.method === "POST" && request.url === "/api/agent-skills/runtime/setup-secret") {
         setupCount += 1;
@@ -10549,15 +10529,25 @@ test("skill host reuses twelve-hour admission, verifies packages and repairs tam
 
       if (
         request.method === "POST"
-        && request.url === "/api/agent-skills/runtime/resolve"
+        && request.url === "/api/agent-skills/runtime/resolve-v2"
       ) {
-        resolveCount += 1;
         const body = JSON.parse((await readRequestBody(request)).toString("utf8"));
         assert.deepEqual(body, {
           companyId,
           skillId,
           expectedReleaseId: releaseId,
+          runtimeSessionId: runtimeArgv[1],
         });
+        // Refuse before returning the release, package URL or provider output.
+        if (body.runtimeSessionId === expiredRuntimeSessionId) {
+          admissionRefusals += 1;
+          response.writeHead(409, { "content-type": "application/json" });
+          response.end(JSON.stringify({ code: "TRELIO_RUNTIME_HOOK_REQUIRED",
+            reason: "expired", expiredCause: "runtime_session_ended",
+            message: "runtime admission expired", token: "PRIVATE_CANARY" }));
+          return;
+        }
+        resolveCount += 1;
         response.setHeader("content-type", "application/json");
         response.end(JSON.stringify({
           releaseId,
@@ -10734,7 +10724,7 @@ test("skill host reuses twelve-hour admission, verifies packages and repairs tam
       return true;
     });
     assert.equal(admissionRefusals, 1, "an admission refusal never retries a stale session");
-    assert.equal(resolveCount, 0, "no package resolution before fresh admission");
+    assert.equal(resolveCount, 0, "no release returned before fresh admission");
     assert.equal(packageDownloadCount, 0, "no package download or provider launch after refusal");
     // Represents the server-selected descriptor from a fresh get_agent_skill,
     // never a host substitution of a new session into the rejected invocation.

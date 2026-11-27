@@ -10297,6 +10297,7 @@ export const resolveAgentSkillRuntimeWithDeviceConsent = async ({
   projectId,
   skillId,
   releaseId,
+  admission,
 }, {
   requestFn = request,
   collectConsentFn = collectAgentSkillDeviceConsentThroughLoopback,
@@ -10305,7 +10306,7 @@ export const resolveAgentSkillRuntimeWithDeviceConsent = async ({
   const requestResolution = () => requestFn(
     origin,
     token,
-    "/api/agent-skills/runtime/resolve",
+    admission ? "/api/agent-skills/runtime/resolve-v2" : "/api/agent-skills/runtime/resolve",
     {
       method: "POST",
       headers: { "content-type": "application/json" },
@@ -10314,6 +10315,7 @@ export const resolveAgentSkillRuntimeWithDeviceConsent = async ({
         ...(projectId ? { projectId } : {}),
         skillId,
         expectedReleaseId: releaseId,
+        ...(admission?.runtimeSessionId ? { runtimeSessionId: admission.runtimeSessionId } : {}),
       }),
     },
   );
@@ -10536,7 +10538,7 @@ const skillCommand = async (
   }
 
   const token = await requireToken(origin);
-  await ensureBridgeCompatibility(origin, token);
+  const compatibility = await ensureBridgeCompatibility(origin, token);
   const profile = currentWorkspaceExecutionProfile();
   const assistant = profile?.kind === "digital_assistant";
   // Same executor and package/account/secret engine, different admission.
@@ -10553,11 +10555,16 @@ const skillCommand = async (
   if (!rawResolution) {
     // A positive admission covers at most twelve hours of this exact session.
     // Expiry never falls back to stale access when Trelio is unavailable.
-    if (!assistant) await assertOrdinaryRuntimePolicyForCompany({
+    // Select the combined resolver from the existing compatibility response.
+    // A refusal from v2 must never fall back to the legacy resolver.
+    const admission = !assistant && compatibility.skillRuntimeResolveVersion === 2
+      ? { runtimeSessionId }
+      : null;
+    if (!assistant && !admission) await assertOrdinaryRuntimePolicyForCompany({
       origin, token, companyId, runtimeSessionId,
     });
     const response = await resolveAgentSkillRuntimeWithDeviceConsent({
-      origin, token, companyId, projectId, skillId, releaseId,
+      origin, token, companyId, projectId, skillId, releaseId, admission,
     }, assistant ? {
       // An unattended task never opens the human bridge's loopback consent
       // window or posts its device-consent endpoint. The managed owner action
