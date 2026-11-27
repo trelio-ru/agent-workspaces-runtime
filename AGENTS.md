@@ -50,7 +50,8 @@ publication tooling также остаются вне этого публичн
 - Очередь цифрового ассистента – [контракт](docs/assistant-inbox.md).
   The carry of a stopped owner answer cannot settle unknown external effects.
   Release its calendar fence only after complete native read-only evidence and
-  the exact accepted successor receipt. Keep both old deliveries in history.
+  the exact accepted successor receipt. Settlement does not require the
+  timer to be due. Keep both old deliveries in history.
   Source attention gates intake before models: email INBOX all new; Telegram/MAX
   private incoming or native mention/direct reply. Ordinary group history stays
   at provider; scheduled review uses accepted per-task WORK.md bookmarks, not

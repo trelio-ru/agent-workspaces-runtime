@@ -5761,7 +5761,10 @@ test(`the due calendar after a stopped owner answer uses its frozen file and lea
     const stored=f.database.prepare('SELECT external_receipt FROM assistant_inbox_deliveries WHERE delivery_id=?').get(newId).external_receipt;
     assert.match(stored,/^assistant:/u);ownReceipt=stored.split(':')[1];
     const later=coordinator.status()[0].nextRunAt,first=newId;
-    assert.ok(later>plan.nextRunAt);f.advance(later-f.options.now());
+    assert.ok(later>plan.nextRunAt);
+    // A normal release of the technical fence must not wait for tomorrow,
+    // start a future calendar pass early, or change its scheduled time.
+    if(mode!=='settled')f.advance(later-f.options.now());
     expected.dueAt=later;pair.dueAt=later;
     if(settle){
       inbox.startRetiredTaskInspection(a.deliveryId,released);
@@ -5794,6 +5797,11 @@ test(`the due calendar after a stopped owner answer uses its frozen file and lea
         assert.equal(inbox.readDelivery(initial.deliveryId).state,'uncertain');
         assert.equal(f.database.prepare('SELECT processed FROM assistant_inbox_events WHERE event_id=?').get(notificationId).processed,1);
         assert.equal(coordinator.status()[0].nextRunAt,later);
+        if(mode==='settled'){
+          assert.ok(f.options.now()<later);
+          assert.equal(await coordinator.workOnce(),null);
+          f.advance(later-f.options.now());
+        }
         client.beginTaskPass=async input=>{
           assert.equal(input.retiredScheduled,undefined);assert.equal(input.notificationId,undefined);assert.ok(!prior.has(input.deliveryId));
           newId=input.deliveryId;return begin(input);

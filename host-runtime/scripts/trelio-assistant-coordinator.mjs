@@ -2397,14 +2397,21 @@ export const createAssistantCoordinator = ({ database, client, native, workspace
       const source=candidate.scheduled?null:inbox.readRetiredAnswer(deliveryId);
       const wake=inbox.reconciliationWake(deliveryId);
       if(!candidate.scheduled&&(!source?.localDraft||wake))continue;
-      if(blockedCompanies.has(scope.companyId)||!plan||!wake&&(plan.state!=='active'||!Number.isSafeInteger(plan.nextRunAt)||plan.nextRunAt>now()))continue;
+      if(blockedCompanies.has(scope.companyId)||!plan)continue;
+      const activeSchedule=plan.state==='active'&&Number.isSafeInteger(plan.nextRunAt);
+      const due=activeSchedule&&plan.nextRunAt<=now();
+      // Settling old technical evidence is independent of the calendar. A
+      // future timer stays where it is, and an ordinary wake can use the
+      // released task slot without waiting for the next day.
+      const carried=source&&activeSchedule&&typeof client.settleCarriedAnswer==='function'?inbox.carriedAnswerBasis(deliveryId):null;
+      if(!wake&&!due&&!carried)continue;
       const {receipt}=inbox.readRetiredTaskWriter(deliveryId);
       if(plan.threadId!==receipt.threadId)continue;
       let job;
       try {
         let retained=null;
         if(source){
-          retained=inbox.firstScheduledMaterial(deliveryId);
+          retained=carried?.material??inbox.firstScheduledMaterial(deliveryId);
           if(!retained){
             const prior=source.request.review.pendingOwnerCheck;
             const options={assistantId:identity.assistantId,taskPass:{companyId:receipt.companyId,taskId,passId:receipt.passId},
@@ -2416,8 +2423,7 @@ export const createAssistantCoordinator = ({ database, client, native, workspace
               path,beforeSha256,afterSha256};
           }
           retained={...retained,review:{...retained.review,dueAt:plan.nextRunAt}};
-          const carried=inbox.carriedAnswerBasis(deliveryId);
-          if(carried&&typeof client.settleCarriedAnswer==='function'){
+          if(carried){
             const cwd=await workspaceForTask(scopeFor(scope,taskId));
             const ownsReleasedWriter=async()=>await native.readWriterReleased(receipt.threadId,cwd,{signal})===true
               &&await passHost.readActivePass()===null;
@@ -2449,6 +2455,7 @@ export const createAssistantCoordinator = ({ database, client, native, workspace
             }
           }
         }
+        if(!wake&&!due)continue;
         const current=await client.readTaskRecoveryContext({...receipt,expectedLeaseRevision:receipt.leaseRevision,
           writerRetirement:receipt,...(retained?{scheduled:retained.review}:{reconcile:true}),...(wake?{notificationId:wake.notificationId}:{})},signal);
         // An applicable owner decision, missing authority, or an unfinished
