@@ -1417,7 +1417,7 @@ const doctor = async (options) => {
   // local MCP schema itself is unavailable to the current model. This remains
   // anonymous and does not reconnect MCP, read bearer tokens or repair config.
   report.publicService = await diagnosePublicTrelioService(normalizeOrigin(options.origin || DEFAULT_ORIGIN));
-  Object.assign(report, buildTrelioBootstrapVerification({ local: report, publicService: report.publicService }));
+  Object.assign(report, buildTrelioBootstrapVerification({ local: report }));
 
   if (options.json === true) {
     process.stdout.write(`${JSON.stringify(report)}\n`);

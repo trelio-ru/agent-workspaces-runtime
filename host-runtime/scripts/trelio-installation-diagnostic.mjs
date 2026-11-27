@@ -20,14 +20,13 @@ const requiresClientRestart = (requiredActions) => requiredActions.some((action)
   action.restartRequired === true || action.plan?.restartRequired === true
 ));
 
-export const buildTrelioConnectionRecovery = (publicService, requiredActions = [], codexMcpRuntime = false) => ({
-  state: ["available", "recovered"].includes(publicService?.state)
-    ? "verify_current_client_tools" : "public_service_not_confirmed",
+const buildTrelioConnectionRecovery = (read, requiredActions, codexMcpRuntime) => ({
+  state: read.state === "client_read_required" ? "verify_current_client_tools" : read.state,
   connectionRetried: false,
   restartRequired: requiresClientRestart(requiredActions),
   instructions: codexMcpRuntime
-    ? "Public probes и doctor не подтверждают доступ модели. После available/recovered проверь доступный маршрут текущего чата (direct или Code Mode) одним безопасным чтением. При точном отказе следуй его причине. Client recovery нужен только при подтверждённом сбое MCP или отсутствии инструмента на доступных маршрутах."
-    : "Public probes и doctor не переподключают MCP и не доказывают доступ модели. После available/recovered проверь direct schema и выполни одно безопасное обычное чтение в этом чате. Если schema действительно отсутствует в текущем ходе, перейди к client recovery для фактического клиента: это наблюдение о выдаче tools, не доказательство failed startup. Не заканчивай повтором doctor или общим отказом без следующего шага. Не объявляй старый 5xx текущей ошибкой. Без наблюдаемого client blocker или exact requiredAction не советуй restart; login, pairing и переустановка требуют своих отдельных оснований. Не придумывай команды или API reconnect.",
+    ? "Если liveVerification.read предлагает nextCall, выполни одно штатное чтение в текущем чате через direct или Code Mode. При точном отказе следуй его причине. Восстановление клиента нужно при подтверждённом сбое MCP или отсутствии инструмента на доступных маршрутах."
+    : "Если план чтения предлагает nextCall, проверь direct schema и выполни одно штатное чтение в текущем чате. При отсутствии schema перейди к восстановлению для фактического клиента. Тайм-аут анонимного запроса описывает только этот запрос. Без наблюдаемого client blocker или exact requiredAction не советуй restart. Login, pairing и переустановка требуют отдельных оснований.",
 });
 
 const CLAUDE_TRELIO_MCP_SERVER = "plugin:trelio-agent-workspaces:trelio";
@@ -90,18 +89,18 @@ export const normalizeDiagnosticReadTarget = (value) => {
   };
 };
 
-const buildDiagnosticReadVerification = ({ clientKind, readTarget, workingFolder, publicService, requiredActions, codexMcpRuntime, prerequisitesChecked = true }) => {
+const buildDiagnosticReadVerification = ({ clientKind, readTarget, workingFolder, requiredActions, codexMcpRuntime, prerequisitesChecked = true }) => {
   const target = normalizeDiagnosticReadTarget(readTarget ?? workingFolder?.scope);
   const nextCall = target
     ? { toolName: target.taskNumber !== undefined ? "get_task" : "get_agent_instructions", arguments: target }
     : { toolName: "list_companies", arguments: {} };
   // Git is required for Workspace work, not for a remote task/rules read.
   // Conversely an established hook/routing/process blocker must be resolved
-  // before a protected read; this plan never bypasses that existing boundary.
+  // before a protected read. Anonymous reachability measures a separate
+  // request and cannot decide whether the client's normal MCP route works.
   const blockers = requiredActions.filter((action) => action.code !== "INSTALL_STANDALONE_GIT").map(({ code }) => code);
   const state = blockers.length ? "prerequisite_action_required"
-    : !prerequisitesChecked ? "prerequisites_not_checked"
-    : ["available", "recovered"].includes(publicService?.state) ? "client_read_required" : "public_service_not_confirmed";
+    : !prerequisitesChecked ? "prerequisites_not_checked" : "client_read_required";
   return {
     state,
     readResult: "not_checked",
@@ -458,19 +457,18 @@ const buildLocalRequiredActions = (local) => {
  * read or changed by this pure projection; execution/evidence stay with the
  * current client, and an unknown routing check is never reported as ready.
  */
-export const buildTrelioBootstrapVerification = ({ local, publicService }) => {
+export const buildTrelioBootstrapVerification = ({ local }) => {
   const requiredActions = buildLocalRequiredActions(local);
   // Use the detected shell's admission profile for the conditional Codex branch.
   // This still does not identify the owning client's current turn or toolset.
   const codexMcpRuntime = local.plugin?.hooks?.runtimeAdmission === "codex_mcp";
+  const readVerification = buildDiagnosticReadVerification({ clientKind: null, requiredActions, codexMcpRuntime });
   return {
     connectionRecovery: {
-      ...buildTrelioConnectionRecovery(publicService, requiredActions, codexMcpRuntime),
+      ...buildTrelioConnectionRecovery(readVerification, requiredActions, codexMcpRuntime),
       clientInspection: "clientRecoveryByKind",
     },
-    readVerification: buildDiagnosticReadVerification({
-      clientKind: null, publicService, requiredActions, codexMcpRuntime,
-    }),
+    readVerification,
     clientRecoveryByKind: {
       clientKind: "not_checked",
       selection: codexMcpRuntime
@@ -579,8 +577,7 @@ export const buildTrelioInstallationDiagnostic = ({
     });
   }
 
-  const publicServiceBlocked = publicService && !["available", "recovered"].includes(publicService.state);
-  if (publicServiceBlocked) warnings.push({
+  if (publicService && !["available", "recovered"].includes(publicService.state)) warnings.push({
     code: "PUBLIC_TRELIO_SERVICE_NOT_CONFIRMED",
     state: publicService.state,
     effect: "public_reachability_only_no_auth_or_client_repair",
@@ -592,13 +589,18 @@ export const buildTrelioInstallationDiagnostic = ({
     node: { status: "not_checked" }, git: { status: "not_checked" }, plugin: { status: "not_checked" },
     runtimeSessions: { status: "not_checked" }, connection: { status: "not_checked" },
   };
+  const read = intent === "diagnostics" ? buildDiagnosticReadVerification({
+    clientKind, readTarget, workingFolder, requiredActions, codexMcpRuntime,
+    prerequisitesChecked: localChecked && routingChecked,
+  }) : null;
+
   return {
     schemaVersion: 1,
     clientKind,
     intent,
     ...(diagnosticTimeouts.length ? { diagnosticTimeouts } : {}),
     status: diagnosticTimeouts.length ? "partial"
-      : requiredActions.length > 0 || publicServiceBlocked || (intent === "diagnostics" && ["blocked", "setup_required"].includes(folder.status))
+      : requiredActions.length > 0 || (intent === "diagnostics" && ["blocked", "setup_required"].includes(folder.status))
       ? "action_required"
       : "ready_for_live_verification",
     local: buildLocalSummary(localEvidence, clientKind),
@@ -638,11 +640,10 @@ export const buildTrelioInstallationDiagnostic = ({
       },
     } : {}),
     liveVerification: {
-      ...(intent === "diagnostics" ? {
-        read: buildDiagnosticReadVerification({ clientKind, readTarget, workingFolder, publicService, requiredActions, codexMcpRuntime,
-          prerequisitesChecked: localChecked && routingChecked }),
+      ...(read ? {
+        read,
         connectionRecovery: {
-          ...buildTrelioConnectionRecovery(publicService, requiredActions, codexMcpRuntime),
+          ...buildTrelioConnectionRecovery(read, requiredActions, codexMcpRuntime),
           ...(clientKind === "codex" ? { clientInspection: "clientInspection.mcpRecovery" } : {}),
         },
       } : {}),

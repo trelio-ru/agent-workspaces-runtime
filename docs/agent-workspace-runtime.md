@@ -3037,7 +3037,8 @@ OAuth. Отсутствующий `list_companies` ведёт к проверк�
 и отсутствующих tools нужна новая сессия с той же папкой, без нового OAuth.
 Этот план не запускает процесс и не меняет состояние диагностики `unverified`.
 
-Diagnostic runtime автоматически проверяет anonymous GET `/mcp` (ожидаемый 405),
+Bootstrap doctor и MCP-диагностика на остальных клиентских маршрутах проверяют
+anonymous GET `/mcp` (ожидаемый 405),
 `/.well-known/oauth-protected-resource/mcp` и
 `/.well-known/oauth-authorization-server` (200 и canonical resource/issuer).
 Публичный origin берётся из host configuration; redirects, credentials и
@@ -3045,18 +3046,20 @@ Diagnostic runtime автоматически проверяет anonymous GET `
 запрос – тремя секундами. Только network/timeout/429/5xx повторяются до четырёх
 попыток с паузами 2/5/15 секунд; успешные и permanent-отказы не повторяются.
 Больший Retry-After завершает probe без раннего повтора и продления бюджета.
-Один алгоритм используется и в CLI bootstrap `bridge doctor --json`.
+Текущий Codex MCP пропускает этот этап. После локальной диагностики доступный
+инструмент выполняет обычное чтение в том же чате.
 Результат `publicService` хранит только closed outcomes, numeric HTTP status и
 номер/паузу попытки: `available`, `recovered`, `unavailable`,
 `unexpected_response`, `cancelled` либо `not_checked`. Response bytes и native
-exceptions не выходят из probe. Этот алгоритм работает независимо от folder
-blocker и не выполняется в чистом onboarding/folder plan.
+exceptions не выходят из probe. Результат описывает публичную сеть и не
+блокирует штатное MCP-чтение. Проверка независима от рабочей папки и не
+выполняется при чистом onboarding/folder plan.
 
 MCP-вызов с `intent=diagnostics` запускает независимые проверки параллельно.
 Медленные локальные проверки могут занять больше минуты, поэтому этот
 read-only intent получает общий лимит 180 с. Лимиты этапов — 150 с для
 локальных компонентов, 60 с для legacy Codex hook/routing, 120 с для рабочей
-папки и 40 с для публичного сервиса. Он возвращает завершившиеся проверки,
+папки и 40 с для публичного сервиса там, где он проверяется. Вызов возвращает завершившиеся проверки,
 а при тайм-ауте этапа выставляет `status=partial` с
 `diagnosticTimeouts[{stage, timeoutMs}]`. Неизвестное
 состояние после тайм-аута не порождает repair action. При непроверенных
@@ -3079,9 +3082,10 @@ effective routing, tool exposure или необходимость restart. Об
 `readResult=not_checked` и `connectionRetried=false` до клиентской проверки.
 
 `liveVerification.connectionRecovery` явно сохраняет `connectionRetried=false`:
-doctor и public probes не переподключают remote MCP. `available/recovered`
-требует проверки direct schema и одного безопасного обычного чтения в текущем
-чате; OAuth/proof/exposure остаются непроверенными до этого чтения. При отсутствии
+doctor и public probes не переподключают remote MCP. Когда
+`liveVerification.read.nextCall` заполнен, доступный штатный маршрут выполняет
+одно чтение в текущем чате. OAuth, proof и выдача инструментов остаются
+непроверенными до его ответа. При отсутствии
 schema штатный reconnect используется только если клиент предоставляет такую
 функцию; неизвестную команду не изобретать. Runtime не наблюдает toolset клиента,
 поэтому этот шаг остаётся модели. Старый 5xx не является текущим отказом после

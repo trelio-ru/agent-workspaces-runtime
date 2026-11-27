@@ -479,8 +479,9 @@ publication tooling также остаются вне этого публичн
   CAS. Исправление предлагается по evidence с сохранением approval.
   Diagnostic read plan выбирает exact следующий native read, но держит результат
   not_checked до client response; request target не меняет folder scope.
-  Public availability/recovery измеряется bounded anonymous probes; doctor
-  не считается reconnect. Restart/new chat требует отдельного evidence.
+  Anonymous public probes для bootstrap и legacy дают справку о сети.
+  Текущий Codex выполняет штатное MCP-чтение без них. Doctor не считается
+  reconnect. Restart/new chat требует отдельного evidence.
   MCP doctor с intent=diagnostics использует отдельные 180 с и лимиты этапов,
   сохраняет законченные проверки и отмечает тайм-ауты без вывода о готовности
   или repair. Onboarding и обычные вызовы сохраняют свой лимит.

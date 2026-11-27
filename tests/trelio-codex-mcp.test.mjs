@@ -753,7 +753,7 @@ test("parallel changed-window calls preserve each admission and exact backend re
   ]);
 });
 
-test("new Codex diagnostics route the read to stdio without checking or changing legacy hook trust", async () => {
+test("new Codex diagnostics offer a real MCP read without probing anonymous HTTP or legacy hooks", async () => {
   const result = await handleToolCall("https://trelio.ru", "diagnose_trelio_installation", {
     clientKind: "codex", intent: "diagnostics", readTarget: { companySlug: "demo" },
   }, {
@@ -765,12 +765,17 @@ test("new Codex diagnostics route the read to stdio without checking or changing
     },
     codexHookSettingsRead: () => assert.fail("new route does not inspect trust"),
     codexRoutingPlan: () => assert.fail("new route does not plan legacy config edits"),
-    publicServiceDiagnosis: async () => ({ state: "available" }),
+    publicServiceDiagnosis: () => assert.fail("the available Codex diagnostic route does not need an anonymous probe"),
     folderDiagnosticPrepare: async () => ({ status: "ready" }),
   });
   const report = result.structuredContent ?? JSON.parse(result.content[0].text);
   assert.equal(report.liveVerification.read.namespace, "mcp__trelio_runtime");
   assert.equal(report.liveVerification.read.invocation, "direct_or_code_mode");
+  assert.deepEqual(report.liveVerification.read.nextCall, {
+    toolName: "get_agent_instructions", arguments: { companySlug: "demo" },
+  });
+  assert.equal(report.liveVerification.connectionRecovery.state, "verify_current_client_tools");
+  assert.equal(report.publicService, undefined);
   assert.match(report.liveVerification.read.instructions, /Code Mode/u);
   assert.equal(report.clientInspection.toolExposure.invocation, "direct_or_code_mode");
   assert.deepEqual(report.clientInspection.toolExposure.checks, ["tool_available_on_current_route", "safe_read_result"]);
@@ -800,10 +805,6 @@ test("a stalled Codex component check returns partial diagnostics before the tot
         started.resolve();
         return new Promise(() => {});
       },
-      publicServiceDiagnosis: async () => {
-        checks.push("public_service");
-        return { state: "available" };
-      },
       folderDiagnosticPrepare: async () => {
         checks.push("working_folder");
         return { status: "ready" };
@@ -811,8 +812,8 @@ test("a stalled Codex component check returns partial diagnostics before the tot
     }),
   });
   await started.promise;
-  assert.deepEqual(checks.sort(), ["public_service", "working_folder"], "independent probes start even while local inspection is blocked");
-  // Let the two already resolved check promises clear their fake timers.
+  assert.deepEqual(checks, ["working_folder"], "the independent folder check starts while local inspection is blocked");
+  // Let the folder check clear its fake timer.
   await new Promise(resolve => setImmediate(resolve));
   t.mock.timers.tick(60_000);
   assert.equal(localSignal.aborted, false, "business tool deadline must not cancel installation diagnostics");
@@ -827,7 +828,6 @@ test("a stalled Codex component check returns partial diagnostics before the tot
   assert.equal(report.local.connection.deviceSessionConfigured, null);
   assert.ok(report.local.hostRuntime.loadedVersion);
   assert.equal(report.workingFolder.status, "ready");
-  assert.equal(report.publicService.state, "available");
   assert.deepEqual(report.requiredActions, []);
   assert.equal(report.liveVerification.read.state, "prerequisites_not_checked");
   assert.equal(report.liveVerification.read.nextCall, null);
@@ -842,7 +842,6 @@ test("a stalled folder check preserves the exact ordinary read plan while caller
     codexMcpRuntime: true,
     localPrerequisiteDiagnosis: async () => ({ status: "ready", node: { status: "ready" }, git: { status: "ready" },
       plugin: { status: "ready" }, connection: { status: "ready" } }),
-    publicServiceDiagnosis: async () => ({ state: "available" }),
     folderDiagnosticPrepare: () => new Promise(() => {}),
   };
   const diagnose = extra => handleToolCall("https://trelio.ru", "diagnose_trelio_installation", input, { ...options, ...extra });
@@ -928,7 +927,6 @@ test("bootstrap recovery keeps the hook-free Codex route when local tools are un
   const report = buildTrelioBootstrapVerification({
     local: { plugin: { status: "ready", hooks: { runtimeAdmission: "codex_mcp" } },
       node: { status: "ready" }, git: { status: "ready" } },
-    publicService: { state: "available" },
   });
   assert.equal(report.readVerification.invocation, "direct_or_code_mode");
   assert.match(report.clientRecoveryByKind.selection, /Code Mode/u);

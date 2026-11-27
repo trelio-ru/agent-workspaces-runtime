@@ -6475,12 +6475,18 @@ const handleToolCallWithoutSkillHints = async (
       }
     };
     const legacyCodex = rawArguments.clientKind === "codex" && !codexMcpRuntime;
+    // This call already reached the current Codex runtime. Its next step is
+    // a real MCP read in the same chat, so avoid waiting for anonymous HTTP
+    // probes of a different route. Bootstrap still measures public reachability.
+    const inspectPublicService = rawArguments.clientKind !== "codex" || !codexMcpRuntime;
     const [local, legacy, folder, publicService] = diagnostics
       ? await Promise.all([
           runInstallationDiagnosticStage("local_components", signal, inspectLocal),
           legacyCodex ? runInstallationDiagnosticStage("codex_hook_routing", signal, inspectLegacyCodex) : {},
           runInstallationDiagnosticStage("working_folder", signal, inspectWorkingFolder),
-          runInstallationDiagnosticStage("public_service", signal, stageSignal => publicServiceDiagnosis(origin, { signal: stageSignal })),
+          inspectPublicService
+            ? runInstallationDiagnosticStage("public_service", signal, stageSignal => publicServiceDiagnosis(origin, { signal: stageSignal }))
+            : {},
         ])
       : [
           { value: await inspectLocal(signal) },

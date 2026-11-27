@@ -3708,7 +3708,7 @@ test("diagnostic input failures retain their typed code through the actual MCP w
   }
 });
 
-test("diagnostic read plan preserves hook and service blockers without claiming a read failure", async () => {
+test("diagnostic read plan respects hook blockers and keeps public reachability advisory", async () => {
   for (const scenario of ["routing", "service", "git"]) {
     const result = await handleToolCall("https://trelio.example", "diagnose_trelio_installation", {
       clientKind: "codex", intent: "diagnostics", readTarget: { companySlug: "company" },
@@ -3719,11 +3719,16 @@ test("diagnostic read plan preserves hook and service blockers without claiming 
         ? { status: "action_required", missingNamespaces: ["mcp__trelio"], restartRequired: true } : { status: "ready" },
       publicServiceDiagnosis: async () => ({ state: scenario === "service" ? "unavailable" : "available", attempts: [] }),
     });
-    const read = JSON.parse(result.content[0].text).liveVerification.read;
+    const report = JSON.parse(result.content[0].text);
+    const { read, connectionRecovery } = report.liveVerification;
     assert.equal(read.readResult, "not_checked");
-    assert.equal(read.state, scenario === "routing" ? "prerequisite_action_required"
-      : scenario === "service" ? "public_service_not_confirmed" : "client_read_required");
-    assert.equal(read.nextCall?.toolName ?? null, scenario === "git" ? "get_agent_instructions" : null);
+    assert.equal(read.state, scenario === "routing" ? "prerequisite_action_required" : "client_read_required");
+    assert.equal(read.nextCall?.toolName ?? null, scenario === "routing" ? null : "get_agent_instructions");
+    assert.equal(connectionRecovery.state, scenario === "routing" ? "prerequisite_action_required" : "verify_current_client_tools");
+    if (scenario === "service") {
+      assert.equal(report.status, "ready_for_live_verification");
+      assert.equal(report.warnings.at(-1).code, "PUBLIC_TRELIO_SERVICE_NOT_CONFIRMED");
+    }
   }
 });
 
@@ -3801,7 +3806,7 @@ test("Codex recovery keeps plugin toggle and full exit conditional on client evi
 
 test("bootstrap doctor shares the MCP recovery plan without claiming a client or a successful read", async () => {
   const publicService = { state: "recovered", attempts: [] };
-  const bootstrap = buildTrelioBootstrapVerification({ local: readyLocalInstallationDiagnosis, publicService });
+  const bootstrap = buildTrelioBootstrapVerification({ local: readyLocalInstallationDiagnosis });
   const result = await handleToolCall("https://trelio.ru", "diagnose_trelio_installation", {
     clientKind: "codex", intent: "diagnostics",
   }, {
@@ -3819,17 +3824,14 @@ test("bootstrap doctor shares the MCP recovery plan without claiming a client or
   assert.doesNotMatch(JSON.stringify(bootstrap.clientRecoveryByKind), /"(?:arguments|confirmed|targetThreadId)":/u);
 });
 
-test("bootstrap public recovery cannot erase local failures or assert model exposure", () => {
-  for (const scenario of ["git", "node", "plugin", "worker", "service"]) {
+test("bootstrap read plan respects local failures and leaves model exposure unknown", () => {
+  for (const scenario of ["git", "node", "plugin", "worker"]) {
     const local = structuredClone(readyLocalInstallationDiagnosis);
     if (["git", "node", "plugin"].includes(scenario)) local[scenario].status = "action_required";
     if (scenario === "worker") local.hookStartup = { status: "attention" };
-    const result = buildTrelioBootstrapVerification({
-      local, publicService: { state: scenario === "service" ? "unavailable" : "recovered" },
-    });
+    const result = buildTrelioBootstrapVerification({ local });
     assert.equal(result.readVerification.readResult, "not_checked");
-    assert.equal(result.readVerification.state, scenario === "git" ? "client_read_required"
-      : scenario === "service" ? "public_service_not_confirmed" : "prerequisite_action_required");
+    assert.equal(result.readVerification.state, scenario === "git" ? "client_read_required" : "prerequisite_action_required");
     assert.equal(result.readVerification.nextCall?.toolName ?? null, scenario === "git" ? "list_companies" : null);
     assert.equal(result.clientRecoveryByKind.codex.evidence.state, "not_checked");
     assert.equal(result.connectionRecovery.connectionRetried, false);
