@@ -809,6 +809,33 @@ test("Remote MCP OAuth/write declaration keeps exact read and write roles", () =
   );
 });
 
+test("Remote MCP static clients expose only reviewed reads, even with editor capabilities", () => {
+  const auth = { ...oauthWriteConfig.authentication, clientRegistration: "static", clientId: "kb_public_client" };
+  const config = validateRemoteMcpPublicationConfig({
+    schemaVersion: 4, transport: oauthWriteConfig.transport, endpoint: oauthWriteConfig.endpoint,
+    protocolVersion: oauthWriteConfig.protocolVersion, authentication: auth, allowedTools: ["get_order"],
+    headers: {}, credentialHelp: null,
+  });
+  assert.deepEqual(config.authentication, auth);
+  assert.equal(remoteMcpPublicationMinimumHostVersion(config), "3.36.0");
+  assert.equal(buildRemoteMcpRequestHeaders({ config })["user-agent"], "node");
+  const read = { name: "get_order" };
+  const write = { name: "update_order", annotations: { readOnlyHint: false } };
+  assert.deepEqual(selectRemoteToolsForPolicy(config, [read, write, { name: "get_unknown" }]),
+    { tools: [read], ignoredTools: [], writeTools: [] });
+  assert.throws(() => selectRemoteToolsForPolicy(config, [write]), { code: "REMOTE_MCP_ALLOWLIST_MISMATCH" });
+  assert.throws(() => selectRemoteToolsForPolicy(config, [read, read]), { code: "REMOTE_MCP_INVALID_TOOL_LIST" });
+  assert.throws(() => selectRemoteToolsForPolicy(config, [{ ...read, annotations: { destructiveHint: true } }]),
+    { code: "REMOTE_MCP_WRITE_TOOL_BLOCKED" });
+  assert.throws(() => validateRemoteMcpPublicationConfig({ ...config, allowedTools: [write.name] }),
+    { code: "REMOTE_MCP_WRITE_TOOL_BLOCKED" });
+  assert.throws(() => validateRemoteMcpPublicationConfig({ ...config, toolPolicy: { mode: "exact_with_confirmed_writes" } }),
+    { code: "REMOTE_MCP_INVALID_TOOL_POLICY" });
+  assert.throws(() => validateRemoteMcpPublicationConfig({
+    ...config, authentication: { ...auth, clientSecret: "synthetic-do-not-accept" },
+  }), { code: "REMOTE_MCP_INVALID_TOOL_POLICY" });
+});
+
 test("Remote MCP OAuth uses DCR, PKCE and a state-bound local callback", async () => {
   const calls = [];
   const httpJson = async (url, request) => {

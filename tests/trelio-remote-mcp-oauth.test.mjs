@@ -13,6 +13,7 @@ import {
   connectRemoteMcpOAuth,
   discoverRemoteMcpOAuth,
   oauthHttpJson,
+  refreshRemoteMcpOAuth,
 } from "../host-runtime/scripts/trelio-remote-mcp-oauth.mjs";
 import { loadPersonalCredential, forgetPersonalCredential, createHarnessConnection } from "../host-runtime/scripts/trelio-remote-mcp.mjs";
 import { BrowserOpenError, withWorkspaceExecutionProfile, writePrivateJsonFile, readPrivateJsonFile } from "../host-runtime/scripts/trelio-workspace.mjs";
@@ -73,6 +74,70 @@ test("fixed native OAuth profiles reject unknown IDs and resources before I/O", 
       publicClientId, resource, httpJson: unexpectedIO, openBrowserFn: unexpectedIO,
     }), { code: "REMOTE_MCP_OAUTH_PROFILE_INVALID" });
   }
+});
+
+test("static Remote MCP client uses the same loopback and PKCE flow without DCR", async () => {
+  const staticConfig = {
+    ...config,
+    authentication: { type: "oauth2_pkce", clientRegistration: "static", clientId: "kb_public_client", scopes: ["kb:read"] },
+  };
+  const metadata = {
+    issuer,
+    authorization_endpoint: `${issuer}/oauth/authorize`,
+    token_endpoint: `${issuer}/oauth/token`,
+    code_challenge_methods_supported: ["S256"],
+    token_endpoint_auth_methods_supported: ["none"],
+  };
+  let authorize;
+  const grants = [];
+  const httpJson = async (url, request) => {
+    if (url.endsWith("/.well-known/oauth-authorization-server")) return { statusCode: 200, body: metadata };
+    assert.equal(url, metadata.token_endpoint, "the provider does not publish a registration endpoint");
+    const body = new URLSearchParams(request.body);
+    assert.equal(body.get("client_id"), staticConfig.authentication.clientId);
+    assert.equal(body.get("resource"), staticConfig.endpoint);
+    assert.equal(body.has("client_secret"), false);
+    const grant = body.get("grant_type");
+    grants.push(grant);
+    if (grant === "authorization_code") {
+      assert.equal(body.get("redirect_uri"), authorize.searchParams.get("redirect_uri"));
+      assert.equal(createHash("sha256").update(body.get("code_verifier")).digest("base64url"),
+        authorize.searchParams.get("code_challenge"));
+    } else {
+      assert.equal(body.get("refresh_token"), "synthetic-refresh");
+    }
+    return { statusCode: 200, body: {
+      token_type: "Bearer", access_token: "synthetic-access", refresh_token: "synthetic-refresh", expires_in: 3600,
+    } };
+  };
+  const session = await connectRemoteMcpOAuth(staticConfig, {
+    httpJson,
+    openBrowserFn: async (url) => {
+      authorize = new URL(url);
+      assert.equal(authorize.origin + authorize.pathname, metadata.authorization_endpoint);
+      assert.equal(authorize.searchParams.get("client_id"), staticConfig.authentication.clientId);
+      assert.equal(authorize.searchParams.get("resource"), staticConfig.endpoint);
+      assert.equal(authorize.searchParams.get("code_challenge_method"), "S256");
+      const callback = new URL(authorize.searchParams.get("redirect_uri"));
+      assert.equal(callback.hostname, "127.0.0.1");
+      assert.equal(callback.pathname, "/callback");
+      callback.searchParams.set("state", authorize.searchParams.get("state"));
+      callback.searchParams.set("code", "synthetic-authorization-code");
+      callback.searchParams.set("iss", issuer);
+      assert.equal(await requestCallback(callback), 200);
+    },
+  });
+  await assertListenerClosed(new URL(authorize.searchParams.get("redirect_uri")));
+  await refreshRemoteMcpOAuth(staticConfig, session, { httpJson });
+  await assert.rejects(refreshRemoteMcpOAuth(staticConfig, { ...session, clientId: "other-client" }, { httpJson }),
+    { code: "REMOTE_MCP_OAUTH_RECONNECT_REQUIRED" });
+  assert.deepEqual(grants, ["authorization_code", "refresh_token"]);
+  await assert.rejects(discoverRemoteMcpOAuth(staticConfig, {
+    httpJson: async () => ({ statusCode: 404, body: null }),
+  }), { code: "REMOTE_MCP_OAUTH_METADATA_INVALID" });
+  await assert.rejects(discoverRemoteMcpOAuth(staticConfig, {
+    httpJson: async () => ({ statusCode: 200, body: { ...metadata, token_endpoint_auth_methods_supported: ["client_secret_post"] } }),
+  }), { code: "REMOTE_MCP_OAUTH_METADATA_INVALID" });
 });
 
 test("OAuth opener failure and cancellation close the exact loopback listener", async (t) => {

@@ -14,6 +14,10 @@ import { openBrowser, browserOpenDiagnostics, renderLocalFormMessage, LOCAL_FORM
 const MAX_OAUTH_RESPONSE_BYTES = 256 * 1024;
 const OAUTH_TIMEOUT_MS = 20_000;
 const CALLBACK_TIMEOUT_MS = 10 * 60 * 1_000;
+// Identify the Node HTTP client as Node, just as Node's own fetch does.
+// Static-client providers can require a User-Agent on their public OAuth
+// routes. Keep the pinned https transport, including its DNS and redirect checks.
+export const REMOTE_MCP_NODE_USER_AGENT = "node";
 
 // The native connection and the OAuth engine share this inventory so a client
 // cannot reach the browser with a profile the engine does not recognize.
@@ -65,7 +69,7 @@ const readJson = (body) => {
 export const oauthHttpJson = async (
   url,
   { method = "GET", contentType = null, body = null, signal } = {},
-  { resolveEndpoint } = {},
+  { resolveEndpoint, identifyNodeClient = false } = {},
 ) => {
   if (typeof resolveEndpoint !== "function") throw new TypeError("resolveEndpoint is required");
   if (signal?.aborted) throw fail("REMOTE_MCP_OAUTH_CANCELLED", "OAuth-подключение отменено.");
@@ -128,6 +132,7 @@ export const oauthHttpJson = async (
       method,
       headers: {
         accept: "application/json",
+        ...(identifyNodeClient ? { "user-agent": REMOTE_MCP_NODE_USER_AGENT } : {}),
         ...(contentType ? { "content-type": contentType } : {}),
         ...(source ? { "content-length": String(source.length) } : {}),
       },
@@ -182,9 +187,16 @@ export const oauthHttpJson = async (
 export const discoverRemoteMcpOAuth = async (config, options) => {
   const httpJson = options.httpJson || oauthHttpJson;
   const origin = baseOrigin(config.endpoint);
+  const usesStaticClient = config.authentication?.clientRegistration === "static";
   const metadataUrl = `${origin}/.well-known/oauth-authorization-server`;
-  const metadata = await httpJson(metadataUrl, { signal: options.signal }, options);
+  const metadata = await httpJson(metadataUrl, { signal: options.signal }, {
+    ...options,
+    identifyNodeClient: usesStaticClient,
+  });
   if (metadata.statusCode === 404) {
+    if (usesStaticClient) {
+      throw fail("REMOTE_MCP_OAUTH_METADATA_INVALID", "OAuth server не опубликовал метаданные для фиксированного клиента.");
+    }
     // The pinned protocol explicitly defines these fallback paths. A timeout,
     // 5xx or malformed document never causes this fallback.
     return {
@@ -195,7 +207,7 @@ export const discoverRemoteMcpOAuth = async (config, options) => {
     };
   }
   const value = metadata.body;
-  if (value.issuer !== origin || !value.registration_endpoint) {
+  if (value?.issuer !== origin || (!usesStaticClient && !value.registration_endpoint)) {
     throw fail("REMOTE_MCP_OAUTH_METADATA_INVALID", "OAuth issuer или registration endpoint не прошёл проверку.");
   }
   if (
@@ -204,11 +216,18 @@ export const discoverRemoteMcpOAuth = async (config, options) => {
   ) {
     throw fail("REMOTE_MCP_OAUTH_PKCE_UNSUPPORTED", "OAuth server не объявил PKCE S256.");
   }
+  if (usesStaticClient && (!Array.isArray(value.code_challenge_methods_supported)
+    || !Array.isArray(value.token_endpoint_auth_methods_supported)
+    || !value.token_endpoint_auth_methods_supported.includes("none"))) {
+    throw fail("REMOTE_MCP_OAUTH_METADATA_INVALID", "OAuth server должен объявить PKCE S256 и поддержку публичного клиента.");
+  }
   return {
     issuer: origin,
     authorizationEndpoint: sameOriginUrl(value.authorization_endpoint, origin),
     tokenEndpoint: sameOriginUrl(value.token_endpoint, origin),
-    registrationEndpoint: sameOriginUrl(value.registration_endpoint, origin),
+    // A published public client is bound to this issuer. Never use a provider's
+    // registration endpoint for that client, even when the provider offers DCR.
+    registrationEndpoint: usesStaticClient ? null : sameOriginUrl(value.registration_endpoint, origin),
   };
 };
 
@@ -351,10 +370,10 @@ export const connectRemoteMcpOAuth = async (
     publicClientId = null, onManualAuthorization, onAuthorizationReceived } = {},
 ) => {
   const expiresAt = Date.now() + CALLBACK_TIMEOUT_MS;
-  // A fixed public profile is a host-owned choice, never part of an external
-  // skill declaration. Keep the exact resource/id pair closed so this option
-  // cannot turn another provider into Trelio's model-independent channel.
-  if (publicClientId !== null && (!Object.values(TRELIO_NATIVE_OAUTH_CLIENT_IDS).includes(publicClientId)
+  const usesStaticClient = config.authentication.clientRegistration === "static";
+  // The native Trelio shortcut remains a separate host-owned profile. The
+  // external client ID comes exclusively from the validated provider release.
+  if (publicClientId !== null && (usesStaticClient || !Object.values(TRELIO_NATIVE_OAUTH_CLIENT_IDS).includes(publicClientId)
     || config.endpoint !== TRELIO_NATIVE_OAUTH_RESOURCE || resource !== TRELIO_NATIVE_OAUTH_RESOURCE)) {
     throw fail("REMOTE_MCP_OAUTH_PROFILE_INVALID", "Недопустимый public OAuth profile.");
   }
@@ -362,7 +381,11 @@ export const connectRemoteMcpOAuth = async (
   const verifier = crypto.randomBytes(32).toString("base64url");
   const challenge = crypto.createHash("sha256").update(verifier).digest("base64url");
   const scopes = config.authentication.scopes.join(" ");
-  let clientId = publicClientId;
+  const fixedClientId = usesStaticClient
+    ? config.authentication.clientId
+    : publicClientId;
+  const oauthResource = usesStaticClient ? config.endpoint : resource;
+  let clientId = fixedClientId;
   const { code, redirectUri } = await waitForOAuthCallback({
     issuer: metadata.issuer,
     openBrowserFn,
@@ -370,7 +393,7 @@ export const connectRemoteMcpOAuth = async (
     expiresAt,
     onManualAuthorization,
     buildAuthorizeUrl: async ({ redirectUri: callbackUrl, state }) => {
-      if (publicClientId === null) {
+      if (fixedClientId === null) {
         const registration = await httpJson(metadata.registrationEndpoint, {
           method: "POST",
           contentType: "application/json",
@@ -405,7 +428,7 @@ export const connectRemoteMcpOAuth = async (
       url.searchParams.set("code_challenge_method", "S256");
       url.searchParams.set("state", state);
       url.searchParams.set("scope", scopes);
-      if (resource !== null) url.searchParams.set("resource", resource);
+      if (oauthResource !== null) url.searchParams.set("resource", oauthResource);
       return url.toString();
     },
   });
@@ -419,10 +442,10 @@ export const connectRemoteMcpOAuth = async (
       client_id: clientId,
       redirect_uri: redirectUri,
       code_verifier: verifier,
-      ...(resource === null ? {} : { resource }),
+      ...(oauthResource === null ? {} : { resource: oauthResource }),
     }).toString(),
     signal,
-  }, { resolveEndpoint });
+  }, { resolveEndpoint, identifyNodeClient: usesStaticClient });
   if (typeof tokenResponse.body?.scope === "string") {
     const granted = new Set(tokenResponse.body.scope.split(/\s+/u));
     if (config.authentication.scopes.some((scope) => !granted.has(scope))) {
@@ -444,6 +467,10 @@ export const refreshRemoteMcpOAuth = async (
   if (!session.refreshToken) {
     throw fail("REMOTE_MCP_OAUTH_RECONNECT_REQUIRED", "OAuth-сессия истекла. Подключите Remote MCP заново.");
   }
+  const usesStaticClient = config.authentication.clientRegistration === "static";
+  if (usesStaticClient && session.clientId !== config.authentication.clientId) {
+    throw fail("REMOTE_MCP_OAUTH_RECONNECT_REQUIRED", "OAuth клиент изменился. Подключите Remote MCP заново.");
+  }
   const metadata = await discoverRemoteMcpOAuth(config, { resolveEndpoint, httpJson, signal });
   if (metadata.issuer !== session.issuer) {
     throw fail("REMOTE_MCP_OAUTH_ISSUER_MISMATCH", "OAuth issuer изменился. Подключите Remote MCP заново.");
@@ -455,9 +482,10 @@ export const refreshRemoteMcpOAuth = async (
       grant_type: "refresh_token",
       client_id: session.clientId,
       refresh_token: session.refreshToken,
+      ...(usesStaticClient ? { resource: config.endpoint } : {}),
     }).toString(),
     signal,
-  }, { resolveEndpoint });
+  }, { resolveEndpoint, identifyNodeClient: usesStaticClient });
   return {
     ...session,
     ...tokenFromResponse(response.body, session.refreshToken),

@@ -116,6 +116,7 @@ import {
   TRELIO_NATIVE_OAUTH_CLIENT_IDS,
   connectRemoteMcpOAuth,
   oauthHttpJson,
+  REMOTE_MCP_NODE_USER_AGENT,
   refreshRemoteMcpOAuth,
 } from "./trelio-remote-mcp-oauth.mjs";
 import { createRemoteMcpOAuthVault, remoteMcpOAuthSessionAccount } from "./trelio-remote-mcp-oauth-vault.mjs";
@@ -171,6 +172,7 @@ const DEFAULT_ORIGIN = "https://trelio.ru";
 const REMOTE_MCP_EXACT_CONFIG_SCHEMA_VERSION = 1;
 const REMOTE_MCP_CONFIG_SCHEMA_VERSION = 2;
 const REMOTE_MCP_OAUTH_WRITE_SCHEMA_VERSION = 3;
+const REMOTE_MCP_STATIC_OAUTH_SCHEMA_VERSION = 4;
 const REMOTE_MCP_PROTOCOL_VERSION = "2025-03-26";
 const REMOTE_MCP_CREDENTIAL_SCHEMA_VERSION = 1;
 const MAX_REMOTE_RESPONSE_BYTES = 4 * 1024 * 1024;
@@ -217,6 +219,7 @@ const SKILL_ID_PATTERN = /^[a-z0-9]+(?:-[a-z0-9]+)*$/u;
 const STABLE_VERSION_PATTERN = /^\d+\.\d+\.\d+$/u;
 const SHA256_PATTERN = /^[0-9a-f]{64}$/u;
 const TOOL_NAME_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/u;
+const PUBLIC_OAUTH_CLIENT_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/u;
 const HTTP_HEADER_NAME_PATTERN = /^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$/u;
 const WRITE_TOOL_NAME_PATTERN = /(?:^|[_:.-])(?:add|archive|create|delete|edit|invite|move|publish|remove|rename|restore|revoke|send|set|update|upload|write)(?:$|[_:.-])/iu;
 const COMPANY_PRIVATE_SKILL_CATEGORIES = new Set([
@@ -610,6 +613,20 @@ const normalizeRemoteMcpConfigForFingerprint = (config) => {
     credentialHelp: config.credentialHelp,
   };
 
+  if (config.schemaVersion === REMOTE_MCP_STATIC_OAUTH_SCHEMA_VERSION) {
+    if (!Array.isArray(config.authentication?.scopes) || !Array.isArray(config.allowedTools)) {
+      throw new RemoteMcpHostError(
+        "REMOTE_MCP_INVALID_TOOL_POLICY",
+        "Remote MCP static OAuth/read-only declaration требует scopes и allowedTools.",
+      );
+    }
+    return {
+      ...commonConfig,
+      authentication: { ...config.authentication, scopes: [...config.authentication.scopes].sort() },
+      allowedTools: [...config.allowedTools].sort(),
+    };
+  }
+
   if (config.schemaVersion === REMOTE_MCP_EXACT_CONFIG_SCHEMA_VERSION) {
     return {
       ...commonConfig,
@@ -664,6 +681,7 @@ export const validateResolvedRemoteMcp = (payload) => {
       REMOTE_MCP_EXACT_CONFIG_SCHEMA_VERSION,
       REMOTE_MCP_CONFIG_SCHEMA_VERSION,
       REMOTE_MCP_OAUTH_WRITE_SCHEMA_VERSION,
+      REMOTE_MCP_STATIC_OAUTH_SCHEMA_VERSION,
     ].includes(config.schemaVersion)
     || config.transport !== "streamable_http"
     || config.protocolVersion !== REMOTE_MCP_PROTOCOL_VERSION
@@ -679,7 +697,32 @@ export const validateResolvedRemoteMcp = (payload) => {
       "Remote MCP использует неподдерживаемый тип авторизации.",
     );
   }
-  if (config.schemaVersion === REMOTE_MCP_EXACT_CONFIG_SCHEMA_VERSION) {
+  const usesStaticClient = config.schemaVersion === REMOTE_MCP_STATIC_OAUTH_SCHEMA_VERSION;
+  if (usesStaticClient) {
+    const auth = config.authentication;
+    if (
+      Object.keys(config).some((key) => ![
+        "schemaVersion", "transport", "endpoint", "protocolVersion",
+        "authentication", "allowedTools", "headers", "credentialHelp",
+      ].includes(key))
+      || auth.type !== "oauth2_pkce"
+      || auth.clientRegistration !== "static"
+      || Object.keys(auth).some((key) => !["type", "clientRegistration", "clientId", "scopes"].includes(key))
+      || typeof auth.clientId !== "string"
+      || !PUBLIC_OAUTH_CLIENT_ID_PATTERN.test(auth.clientId)
+      || !Array.isArray(auth.scopes)
+      || auth.scopes.length < 1
+      || auth.scopes.length > 16
+      || auth.scopes.some((scope) => typeof scope !== "string" || !/^[A-Za-z0-9._:/-]{1,120}$/u.test(scope))
+      || new Set(auth.scopes).size !== auth.scopes.length
+    ) {
+      throw new RemoteMcpHostError(
+        "REMOTE_MCP_INVALID_TOOL_POLICY",
+        "Remote MCP static OAuth/read-only declaration не прошла локальную проверку.",
+      );
+    }
+  }
+  if (config.schemaVersion === REMOTE_MCP_EXACT_CONFIG_SCHEMA_VERSION || usesStaticClient) {
     if (
       !Array.isArray(config.allowedTools)
       || config.allowedTools.length < 1
@@ -1463,6 +1506,9 @@ export const buildRemoteMcpRequestHeaders = ({
 }) => ({
   accept: "application/json, text/event-stream",
   "mcp-protocol-version": config.protocolVersion,
+  ...(config.schemaVersion === REMOTE_MCP_STATIC_OAUTH_SCHEMA_VERSION
+    ? { "user-agent": REMOTE_MCP_NODE_USER_AGENT }
+    : {}),
   ...config.headers,
   ...(body ? {
     "content-type": "application/json",
@@ -1970,7 +2016,8 @@ const getDynamicToolRejectionReason = (tool) => {
  * Schema v1 preserves the historical exact allowlist. Schema v2 deliberately
  * discovers new tools at runtime, but only a strict read-only subset becomes
  * callable. Unknown or write-capable tools are ignored per tool so adding one
- * cannot disable the provider's existing safe reads.
+ * cannot disable the provider's existing safe reads. Schema v4 requires the
+ * published read-only subset and leaves additional tools inaccessible.
  */
 export const selectRemoteToolsForPolicy = (config, tools) => {
   if (config.schemaVersion === REMOTE_MCP_EXACT_CONFIG_SCHEMA_VERSION) {
@@ -2025,6 +2072,19 @@ export const selectRemoteToolsForPolicy = (config, tools) => {
       "REMOTE_MCP_INVALID_TOOL_LIST",
       "Remote MCP tools/list содержит недопустимые или неоднозначные tool names.",
     );
+  }
+
+  if (config.schemaVersion === REMOTE_MCP_STATIC_OAUTH_SCHEMA_VERSION) {
+    // An editor's account can advertise write methods. The release-reviewed
+    // allowlist is the entire callable set and never promotes provider hints
+    // or unfamiliar names into an OAuth permission. All reviewed reads must
+    // still exist and must pass the same role checks as schema v1.
+    const approved = new Set(config.allowedTools);
+    return {
+      tools: assertExactReadOnlyToolList(config, tools.filter((tool) => approved.has(tool.name))),
+      ignoredTools: [],
+      writeTools: [],
+    };
   }
 
   const selectedTools = [];
@@ -3031,7 +3091,8 @@ const readAndBindAgentSkillPackage = async ({
 };
 
 export const remoteMcpPublicationMinimumHostVersion = config => (
-  config.schemaVersion === REMOTE_MCP_OAUTH_WRITE_SCHEMA_VERSION ? "3.1.0"
+  config.schemaVersion === REMOTE_MCP_STATIC_OAUTH_SCHEMA_VERSION ? "3.36.0"
+    : config.schemaVersion === REMOTE_MCP_OAUTH_WRITE_SCHEMA_VERSION ? "3.1.0"
     : config.schemaVersion === REMOTE_MCP_CONFIG_SCHEMA_VERSION ? "1.13.3" : "1.4.7"
 );
 

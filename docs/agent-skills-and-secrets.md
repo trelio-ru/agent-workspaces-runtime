@@ -238,9 +238,14 @@ resolve.
 read-only allowlist, schema v2 `all_read_only` для credential-free provider-а
 либо schema v3 `exact_with_confirmed_writes` с OAuth PKCE/DCR и точными
 непересекающимися read/write lists. Schema v2 требует host `>=1.13.3`, v3 –
-`>=3.1.0`. v3 использует same-origin OAuth metadata/endpoints и локальный
+`>=3.1.0`. Schema v4 требует host `>=3.36.0`, зарегистрированный
+публичный `clientId` и exact read-only allowlist. Обе OAuth-схемы используют same-origin
+OAuth metadata/endpoints и локальный
 loopback callback; токены остаются в системном защищённом хранилище и не
 попадают в Trelio либо model context.
+Для v4 exact MCP endpoint привязывает OAuth `resource` при входе, обмене и
+refresh. Fixed client ID входит в fingerprint декларации. Host требует
+опубликованные PKCE S256 и public client auth method `none`.
 Bundled `trelio-remote-skills` host:
 
 - повторяет live resolve перед каждым действием;
@@ -251,9 +256,12 @@ Bundled `trelio-remote-skills` host:
   имени и exact `readOnlyHint=true`, `destructiveHint=false`, а небезопасные и
   не полностью размеченные tools игнорирует по одному;
 - для v3 требует полного совпадения live `tools/list` с exact read/write
-  списками и ролью annotations; перед каждым write tool показывает полные
+  списками и ролью annotations. Перед каждым write tool host показывает полные
   аргументы в локальной странице и допускает один вызов только после её
   отдельного клика;
+- для v4 требует все имена из `allowedTools` в live каталоге и применяет
+  read-only проверки v1 к этому набору. Другие инструменты остаются вне
+  callable списка, даже если их видит редактор;
 - никогда не отправляет write headers;
 - завершает JSON-RPC по первому matching SSE event и применяет абсолютный
   deadline, не продлеваемый heartbeat.
