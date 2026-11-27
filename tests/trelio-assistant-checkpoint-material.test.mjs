@@ -2,8 +2,10 @@ import assert from 'node:assert/strict';
 import { createHash, randomUUID } from 'node:crypto';
 import test from 'node:test';
 import {
-  assistantCarriedAnswerReadOnly, assistantNativePrompt, assistantRetiredCheckpointMaterial, assistantWorkStateContext,
+  assistantCarriedAnswerReadOnly, assistantDeliveryMarker, assistantNativePrompt, assistantRetiredCheckpointMaterial,
+  assistantWorkStateContext, readAssistantCodexDelivery,
 } from '../host-runtime/scripts/trelio-assistant-codex.mjs';
+import { nativeRpc } from './fixtures/assistant-native-rpc.mjs';
 
 const digest = text => createHash('sha256').update(text, 'utf8').digest('hex');
 
@@ -106,6 +108,52 @@ test('a carried answer releases the fence only after the whole original and insp
     alter(candidate);
     assert.equal(assistantCarriedAnswerReadOnly(candidate,deliveryId,scope),null);
   }
+});
+
+test('carried answer history ends at the exact checkpoint source', async () => {
+  const { turn: original, scope, deliveryId, expected } = example();
+  const threadId = randomUUID(), retirementReceiptId = randomUUID();
+  const inspection = { id: randomUUID(), status: 'completed', items: [
+    { type: 'userMessage', content: [{ type: 'text', text: assistantDeliveryMarker(retirementReceiptId) + '\ninspection' }] },
+    { type: 'mcpToolCall', server: 'trelio-assistant', tool: 'get_task', status: 'completed',
+      arguments: { taskPass: scope.taskPass }, result: { structuredContent: { tasks: [] } } },
+  ] };
+  const unrelated = () => ({ id: randomUUID(), status: 'completed', items: [] });
+  const gap = Array.from({ length: 5 }, unrelated);
+  const older = Array.from({ length: 70 }, unrelated);
+  // The runtime can afford the bounded prefix even when the whole thread is
+  // too long. Summary pages carry roots only. Full pages supply native items.
+  const read = (history, { sourceTurnId = original.id, reorderFull = false } = {}) => {
+    const reads = [];
+    const spawnProcess = nativeRpc(({ method, params }) => {
+      assert.equal(params.threadId, threadId);
+      if (method === 'thread/read') return { result: { thread: { id: threadId, cwd: process.cwd() } } };
+      assert.equal(method, 'thread/turns/list');
+      assert.equal(params.limit, 5);
+      assert.equal(params.sortDirection, 'desc');
+      const offset = Number(params.cursor ?? 0);
+      reads.push([params.itemsView, offset]);
+      const page = history.slice(offset, offset + params.limit);
+      const data = params.itemsView === 'summary'
+        ? page.map(turn => ({ ...turn, items: turn.items.filter(item => item.type === 'userMessage') }))
+        : reorderFull ? page.reverse() : page;
+      const nextCursor = offset + params.limit < history.length ? String(offset + params.limit) : null;
+      return { result: { data, nextCursor } };
+    });
+    return readAssistantCodexDelivery(threadId, deliveryId, { executable: process.execPath, environment: {},
+      spawnProcess, carriedAnswer: { ...scope, retirementReceiptId, sourceTurnId } }).then(result => ({ result, reads }));
+  };
+  const history = [inspection, ...gap, original, ...older];
+  assert.deepEqual(await read(history), { result: { state: 'carried_answer_read_only', material: expected },
+    reads: [['summary', 0], ['full', 0], ['summary', 5], ['full', 5]] });
+  for (const malformed of [
+    [original, inspection, ...older],
+    [inspection, { ...inspection, id: randomUUID() }, original, ...older],
+    [inspection, { ...original, id: randomUUID() }, original, ...older],
+    [inspection, ...older, original],
+  ]) assert.deepEqual((await read(malformed)).result, { state: 'uncertain' });
+  assert.deepEqual((await read(history, { sourceTurnId: randomUUID() })).result, { state: 'uncertain' });
+  assert.deepEqual((await read(history, { reorderFull: true })).result, { state: 'uncertain' });
 });
 
 test('first scheduled file command carries the checkpoint through the signed worker and the read-only inbox', async t => {

@@ -2437,7 +2437,7 @@ export const createAssistantCoordinator = ({ database, client, native, workspace
               const witness=await native.readDelivery(receipt.threadId,deliveryId,{signal,carriedAnswer:{
                 assistantId:identity.assistantId,taskPass:{companyId:receipt.companyId,taskId,passId:receipt.passId},
                 questionId:source.request.review.pendingOwnerCheck.questionId,workspaceId:retained.review.workspaceId,
-                runId:retained.review.runId,retirementReceiptId:receipt.receiptId}});
+                runId:retained.review.runId,retirementReceiptId:receipt.receiptId,sourceTurnId:retained.review.sourceTurnId}});
               const {path,beforeSha256,afterSha256}=retained;
               const {sourceTurnId,workspaceId,runId,checkpointId,draftHead}=retained.review;
               if(witness?.state==='carried_answer_read_only'&&isDeepStrictEqual(witness.material,{

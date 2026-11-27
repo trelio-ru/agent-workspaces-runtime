@@ -251,6 +251,14 @@ it. Independent destination edits stop the copy. The origin Run retains its
 history and other files. The new Run uses the ordinary checkpoint, finish and
 business outcome checks.
 
+When a later scheduled pass has accepted that carry, settling the old fence
+still requires both native turns to prove that the original and its inspection
+had no external writes. Scan the bounded native history from newest to the
+checkpoint's recorded source turn. Require exactly one newer inspection and
+the original delivery marker on that exact turn. The prefix must reach that
+turn within budget. Older history cannot attest this carry or consume its
+search budget.
+
 ## External ACK attempts (schema v5)
 
 The same private event journal adds an `ack_started` bit, original attempt

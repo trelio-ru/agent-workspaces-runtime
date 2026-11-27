@@ -52,6 +52,8 @@ publication tooling также остаются вне этого публичн
   Release its calendar fence only after complete native read-only evidence and
   the exact accepted successor receipt. Settlement does not require the
   timer to be due. Keep both old deliveries in history.
+  Check the native prefix through the checkpoint's exact original turn for
+  the single newer inspection marker. Earlier history cannot certify this carry.
   Source attention gates intake before models: email INBOX all new; Telegram/MAX
   private incoming or native mention/direct reply. Ordinary group history stays
   at provider; scheduled review uses accepted per-task WORK.md bookmarks, not

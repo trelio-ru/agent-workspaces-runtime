@@ -5774,6 +5774,7 @@ test(`the due calendar after a stopped owner answer uses its frozen file and lea
         if(!options.carriedAnswer)return readCheckpoint(thread,id,options);
         assert.equal(thread,answer.threadId);assert.equal(id,a.deliveryId);
         assert.equal(options.carriedAnswer.retirementReceiptId,released.receiptId);
+        assert.equal(options.carriedAnswer.sourceTurnId,expected.sourceTurnId);
         return mode==='unknown_effect'?{state:'uncertain'}:{state:'carried_answer_read_only',material};
       };
       client.settleCarriedAnswer=async(retirement,previous,selector,observe)=>{

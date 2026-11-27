@@ -2596,36 +2596,41 @@ const readOriginalRetiredTurn=async(request,threadId,
   return {original,failed};
 };
 
-// The carry may have completed several scheduled cycles since the writer
-// stopped. Look up the original and its one inspection in native history,
-// with complete bounded marker coverage. Only those two turns need full items.
-const readCarriedAnswerTurns=async(request,threadId,deliveryId,inspectionId)=>{
+// Only the history from the newest turn through the checkpoint's exact source
+// can contain its subsequent inspection. Older turns cannot attest this carry.
+const readCarriedAnswerTurns=async(request,threadId,deliveryId,inspectionId,sourceTurnId)=>{
+  if(!UUID.test(sourceTurnId??'')||deliveryId===inspectionId)return null;
   const markers=[deliveryId,inspectionId].map(value=>assistantDeliveryMarker(value)+'\n');
-  if(deliveryId===inspectionId)return null;
   const selected=new Map(),seen=new Set(),turnIds=new Set();
   let cursor=null;
   for(let index=0;index<12;index++){
     const query={threadId,limit:5,sortDirection:'desc',...(cursor?{cursor}:{})};
     const summary=await request('thread/turns/list',{...query,itemsView:'summary'});
-    if(!Array.isArray(summary?.data)||summary.data.length>5)return null;
+    if(!Array.isArray(summary?.data)||!summary.data.length||summary.data.length>5)return null;
     const matches=new Map();
+    let foundSource=false;
     for(const turn of summary.data){
       if(!UUID.test(turn?.id??'')||turnIds.has(turn.id)||!Array.isArray(turn.items))return null;
       turnIds.add(turn.id);
+      foundSource=turn.id===sourceTurnId;
       for(const item of turn.items){
         if(item?.type!=='userMessage')continue;
         if(!Array.isArray(item.content))return null;
         for(const input of item.content){
           const marker=markers.find(value=>input?.type==='text'&&typeof input.text==='string'&&input.text.startsWith(value));
           if(!marker)continue;
+          // A copied delivery marker in a newer turn is ambiguous, even if
+          // that turn looks read-only. Only the accepted checkpoint can pin it.
+          if(marker===markers[0]&&!foundSource||marker===markers[1]&&foundSource)return null;
           if(matches.has(marker)||selected.has(marker))return null;
           matches.set(marker,turn.id);
         }
       }
+      if(foundSource)break;
     }
     if(matches.size){
       const full=await request('thread/turns/list',{...query,itemsView:'full'});
-      if(!Array.isArray(full?.data)||!isDeepStrictEqual(full.data.map(turn=>turn.id),summary.data.map(turn=>turn.id)))return null;
+      if(!Array.isArray(full?.data)||!isDeepStrictEqual(full.data.map(turn=>turn?.id),summary.data.map(turn=>turn?.id)))return null;
       for(const [marker,turnId] of matches){
         const turn=full.data.find(value=>value.id===turnId);
         const root=turn.items?.[0];
@@ -2634,7 +2639,7 @@ const readCarriedAnswerTurns=async(request,threadId,deliveryId,inspectionId)=>{
         selected.set(marker,turn);
       }
     }
-    if(summary.nextCursor===null)
+    if(foundSource)
       return selected.size===2&&selected.keys().next().value===markers[1]
         ?{original:selected.get(markers[0]),inspection:selected.get(markers[1])}:null;
     if(typeof summary.nextCursor!=='string'||!summary.nextCursor||summary.nextCursor.length>1024||seen.has(summary.nextCursor))return null;
@@ -3328,7 +3333,8 @@ export const readAssistantCodexDelivery = (threadId, deliveryId, options = {}) =
       return material?{state:'checkpoint_observed',material}:{state:'uncertain'};
     }
     if(options.carriedAnswer!==undefined){
-      const selected=await readCarriedAnswerTurns(request,threadId,deliveryId,options.carriedAnswer.retirementReceiptId);
+      const {retirementReceiptId,sourceTurnId}=options.carriedAnswer;
+      const selected=await readCarriedAnswerTurns(request,threadId,deliveryId,retirementReceiptId,sourceTurnId);
       const material=selected&&assistantCarriedAnswerReadOnly(selected,deliveryId,options.carriedAnswer);
       return material?{state:'carried_answer_read_only',material}:{state:'uncertain'};
     }
