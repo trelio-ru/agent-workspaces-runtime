@@ -146,6 +146,7 @@ import {
   normalizeAgentSkillBrowserSession,
   normalizeAgentSkillDeviceConsentChallenge,
   normalizeResolvedSkillRuntimeArtifact,
+  resolveMacosBridgeKeychainHelper,
   openCompanyE2eeAgentSecretCheckout,
   openBrowser,
   parseAndValidateAgentSkillPackage,
@@ -9003,7 +9004,78 @@ test("bridge fails closed before reading credentials from unsafe POSIX paths", {
   }
 });
 
-test("macOS bridge migrates a legacy file session into Keychain before deleting plaintext", {
+const keychainSourceDigest = async () => createHash("sha256")
+  .update(await readFile(new URL("../host-runtime/scripts/native-bridge-keychain/BridgeKeychain.swift", import.meta.url)))
+  .update(`\0${process.arch}\0v1`, "utf8")
+  .digest("hex");
+
+test("macOS Keychain build recovers a dead owner without admitting another compiler", {
+  skip: process.platform !== "darwin",
+}, async t => {
+  const cacheDirectory = await mkdtemp(path.join(os.tmpdir(), "trelio-keychain-claim-"));
+  t.after(() => rm(cacheDirectory, { recursive: true, force: true }));
+  const digest = await keychainSourceDigest();
+  const lock = path.join(cacheDirectory, `${digest}-v2`, "build.lock");
+  const exited = execFileAsync(process.execPath, ["-e", ""]);
+  await exited;
+  const id = "c2722985-50ae-4369-88fe-cf9526f1fa10";
+  const owner = { pid: exited.child.pid, id };
+  await writePrivateJsonFile(path.join(lock, `${owner.pid}-${id}.json`), owner);
+  const acquired = Promise.withResolvers(), finish = Promise.withResolvers();
+  let compiles = 0;
+  const compile = async (_source, executable) => {
+    compiles++;
+    acquired.resolve();
+    await finish.promise;
+    await writeFile(executable, "fixture helper");
+  };
+  const contenders = Array.from({ length: 3 }, () => resolveMacosBridgeKeychainHelper({ cacheDirectory, compile }));
+  try {
+    await Promise.race([acquired.promise, ...contenders]);
+    const names = await readdir(lock);
+    assert.equal(names.length, 1);
+    assert.ok(names[0].startsWith(`${process.pid}-`));
+    assert.equal((await readPrivateJsonFile(path.join(lock, names[0]))).pid, process.pid);
+    // A known live PID must survive an expired wait, including when the
+    // contender tries to recover the same lock before its compiler can run.
+    await assert.rejects(resolveMacosBridgeKeychainHelper({ cacheDirectory,
+      timeoutMs: 200, compile: () => assert.fail("a live owner cannot be replaced") }),
+    { diagnosticReason: "MACOS_KEYCHAIN_PREPARATION_TIMEOUT" });
+    assert.deepEqual(await readdir(lock), names);
+  } finally {
+    finish.resolve();
+    await Promise.allSettled(contenders);
+  }
+  const paths = await Promise.all(contenders);
+  assert.equal(new Set(paths).size, 1);
+  assert.equal(compiles, 1);
+  assert.equal(await readFile(paths[0], "utf8"), "fixture helper");
+  await assert.rejects(lstat(lock), { code: "ENOENT" });
+});
+
+test("macOS Keychain build releases its claim and publishes nothing after cancellation", {
+  skip: process.platform !== "darwin",
+}, async t => {
+  const cacheDirectory = await mkdtemp(path.join(os.tmpdir(), "trelio-keychain-cancel-"));
+  t.after(() => rm(cacheDirectory, { recursive: true, force: true }));
+  const buildDirectory = path.join(cacheDirectory, `${await keychainSourceDigest()}-v2`);
+  const controller = new AbortController();
+  const reason = new Error("fixture build cancelled");
+  await assert.rejects(resolveMacosBridgeKeychainHelper({ cacheDirectory, signal: controller.signal,
+    compile: async (_source, executable) => {
+      // Even completion racing a cancellation cannot publish the result.
+      await writeFile(executable, "cancelled helper");
+      controller.abort(reason);
+    },
+  }), error => error === reason);
+  assert.deepEqual(await readdir(buildDirectory), []);
+  const executable = await resolveMacosBridgeKeychainHelper({ cacheDirectory,
+    compile: async (_source, output) => writeFile(output, "retry helper"),
+  });
+  assert.equal(await readFile(executable, "utf8"), "retry helper");
+});
+
+test("macOS bridge migrates a legacy file session despite an ownerless legacy Keychain build lock", {
   skip: process.platform !== "darwin",
 }, async () => {
   const temporaryDirectory = await mkdtemp(path.join(os.tmpdir(), "trelio-bridge-keychain-migration-"));
@@ -9057,6 +9129,10 @@ test("macOS bridge migrates a legacy file session into Keychain before deleting 
     );
     await chmod(credentialFile, 0o600);
 
+    const cache = path.join(credentialDirectory, "native-helpers", "bridge-keychain");
+    const legacyLock = path.join(cache, await keychainSourceDigest(), "build.lock");
+    await mkdir(legacyLock, { recursive: true, mode: 0o700 });
+    const legacyIdentity = await lstat(legacyLock);
     const result = await execFileAsync(
       process.execPath,
       storedSessionReadArguments(origin),
@@ -9067,6 +9143,8 @@ test("macOS bridge migrates a legacy file session into Keychain before deleting 
     );
 
     assert.equal(result.stdout, "true");
+    assert.equal((await lstat(legacyLock)).ino, legacyIdentity.ino);
+    assert.deepEqual(await readdir(legacyLock), []);
     const credentials = JSON.parse(await readFile(credentialFile, "utf8"));
     assert.equal(credentials[origin]?.bridgeSessionToken, undefined);
     // Rebuild the unsigned source-reviewed helper at the same OS user. The

@@ -128,6 +128,49 @@ test("Codex stdio startup exposes the closed Keychain stage and reason in its lo
   }
 });
 
+test("Keychain preparation timeouts keep Codex recovery available without opening OAuth", async () => {
+  for (const reason of ["MACOS_KEYCHAIN_PREPARATION_TIMEOUT", "MACOS_KEYCHAIN_COMPILATION_TIMEOUT"]) {
+    const privateDetail = "fixture-token /private/credential.json";
+    const dispatched = [];
+    let blocked = true;
+    const connection = createHarnessConnection({ nativeClient: "codex",
+      httpJson: async () => ({ body: { issuer: "https://trelio.ru", scopes_supported: ["mcp:read"] } }),
+      vault: { read: async () => {
+        if (blocked) throw new MacosKeychainHelperError(privateDetail, reason);
+        return { accessToken: "fixture-token", expiresAt: Date.now() + 60_000 };
+      } },
+      connectOAuth: () => assert.fail("a blocked vault must not open browser OAuth"),
+      httpRequest: async ({ payload }) => {
+        dispatched.push(payload.method);
+        return { sessionId: "synthetic", message: { jsonrpc: "2.0", id: payload.id,
+          result: payload.method === "initialize" ? { protocolVersion: "2025-03-26" }
+            : { tools: [{ name: "list_companies" }] } } };
+      },
+    });
+    const handler = createCodexMcpHandler({ connect: () => connection });
+    assert.ok((await handler(frame("initialize"), { clientInfo })).result);
+    const listing = await handler(frame("tools/list"));
+    assert.deepEqual(listing.result.tools.map(tool => tool.name), ["trelio_retry_catalog", "trelio_connect", "trelio_read"]);
+    assert.match(listing.result.tools[0].description, new RegExp(reason, "u"));
+    assert.equal(listing.result._meta["trelio/catalogReason"], reason);
+    assert.equal(listing.result._meta["trelio/catalogTiming"].stage, "keychain_preparation");
+    const connect = await handler(frame("tools/call", { name: "trelio_connect" }));
+    assert.equal(connect.result.isError, true);
+    assert.equal(readResult(connect).code, reason);
+    assert.equal(readResult(connect).stage, "keychain_preparation");
+    const retry = () => handler(frame("tools/call", { name: "trelio_retry_catalog" }));
+    const failed = await retry();
+    assert.equal(readResult(failed).reason, reason);
+    assert.equal(readResult(failed).code, "TRELIO_CODEX_CATALOG_UNAVAILABLE");
+    assert.doesNotMatch(JSON.stringify([listing, connect, failed]), /fixture-token|credential\.json/u);
+    assert.deepEqual(dispatched, []);
+
+    blocked = false;
+    assert.equal(readResult(await retry()).catalogStatus, "ready");
+    assert.deepEqual(dispatched, ["initialize", "notifications/initialized", "tools/list"]);
+  }
+});
+
 test("Codex startup projects unknown stages and reasons without changing other desktop clients", async () => {
   const privateDetail = "PRIVATE_ERROR_FROM_UPSTREAM";
   const options = { connect: () => ({

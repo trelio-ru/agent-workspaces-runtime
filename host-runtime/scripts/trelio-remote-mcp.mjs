@@ -7841,7 +7841,7 @@ export const { observeHarnessRuntime, harnessToolName, projectHarnessMcpResult,
       }
       throwIfAborted(signal);
       onStage?.("credential_store");
-      const current = await store.read(ORIGIN, identity);
+      const current = await store.read(ORIGIN, identity, { signal });
       throwIfAborted(signal);
       if (!current || current.expiresAt <= Date.now()) throw fail(publicProfile?.authRequired ?? "TRELIO_HARNESS_AUTH_REQUIRED",
         "Подключите Trelio инструментом trelio_connect. Вход выполняется только в браузере.");
@@ -7947,7 +7947,7 @@ export const { observeHarnessRuntime, harnessToolName, projectHarnessMcpResult,
     };
     const establishConnection = (signal, reauthorize, onManualAuthorization, onAuthorizationReceived) => withPrivateProcessSession(async () => {
       const target = await readMetadata(signal);
-      const current = await store.read(ORIGIN, target);
+      const current = await store.read(ORIGIN, target, { signal });
       if (reauthorize || !current || current.expiresAt <= Date.now()) {
         const created = await connectOAuth(config(), { signal, onManualAuthorization, onAuthorizationReceived,
           resolveEndpoint: resolveFixedTrelioEndpoint,
@@ -7956,7 +7956,7 @@ export const { observeHarnessRuntime, harnessToolName, projectHarnessMcpResult,
           maximumLifetimeSeconds: 365 * 24 * 60 * 60 });
         throwIfAborted(signal);
         await store.write(ORIGIN, target, created);
-        const saved = await store.read(ORIGIN, target);
+        const saved = await store.read(ORIGIN, target, { signal });
         if (!saved || saved.accessToken !== created.accessToken) throw fail("TRELIO_HARNESS_AUTH_STORE_FAILED", "OAuth не подтверждён системным хранилищем.");
       }
       // Explicit reconnect starts a new read-only MCP negotiation; it never
@@ -8828,7 +8828,7 @@ const codexStartupMethods = new Map([
   ["initialize", "initialize"], ["tools/list", "tools_list"], ["resources/list", "resources_list"],
 ]);
 const codexStartupStages = new Set([
-  "oauth_metadata", "credential_store", "session_init_wait", "mcp_initialize", "mcp_initialized",
+  "oauth_metadata", "credential_store", "keychain_preparation", "session_init_wait", "mcp_initialize", "mcp_initialized",
   "catalog_headers", "catalog_first_byte", "catalog_body", "catalog_decode", "catalog_validation",
 ]);
 const codexStartupCodes = new Set([
@@ -8839,20 +8839,36 @@ const codexStartupCodes = new Set([
   "UNABLE_TO_VERIFY_LEAF_SIGNATURE", "SELF_SIGNED_CERT_IN_CHAIN", "DEPTH_ZERO_SELF_SIGNED_CERT",
 ]);
 const codexKeychainStartupReasons = new Set([
-  "MACOS_KEYCHAIN_PREPARATION_TIMEOUT", "MACOS_KEYCHAIN_PREPARATION_FAILED", "MACOS_KEYCHAIN_TIMEOUT",
+  "MACOS_KEYCHAIN_PREPARATION_TIMEOUT", "MACOS_KEYCHAIN_COMPILATION_TIMEOUT",
+  "MACOS_KEYCHAIN_PREPARATION_FAILED", "MACOS_KEYCHAIN_TIMEOUT",
   "MACOS_KEYCHAIN_SPAWN_FAILED", "MACOS_KEYCHAIN_OPERATION_FAILED",
   "MACOS_KEYCHAIN_IO_FAILED", "MACOS_KEYCHAIN_RESPONSE_INVALID",
 ]);
+
+const codexKeychainPreparationTimeout = error => {
+  if (!(error instanceof MacosKeychainHelperError)) return null;
+  const reason = error.diagnosticReason;
+  if (reason === "MACOS_KEYCHAIN_PREPARATION_TIMEOUT") {
+    return { reason, message: "Истекло время ожидания блокировки сборки macOS Keychain helper." };
+  }
+  if (reason === "MACOS_KEYCHAIN_COMPILATION_TIMEOUT") {
+    return { reason, message: "Истекло время сборки macOS Keychain helper." };
+  }
+  return null;
+};
 
 const codexStartupError = (error, stage) => {
   // Codex includes the JSON-RPC message in its startup log. The error data
   // mirrors the two closed fields for clients that retain structured errors.
   // An upstream or system exception can supply neither free text nor a path.
-  const knownCode = codexStartupCodes.has(error?.code) ? error.code : codexCatalogTransportFailure(error)?.reason;
+  const keychainTimeout = codexKeychainPreparationTimeout(error);
+  const knownCode = keychainTimeout?.reason
+    ?? (codexStartupCodes.has(error?.code) ? error.code : codexCatalogTransportFailure(error)?.reason);
   const code = knownCode ?? "TRELIO_CODEX_MCP_FAILED";
   const keychainReason = error instanceof MacosKeychainHelperError && codexKeychainStartupReasons.has(error.diagnosticReason)
     ? error.diagnosticReason : null;
   const reason = keychainReason ?? knownCode ?? "UNKNOWN";
+  if (keychainTimeout) stage = "keychain_preparation";
   return { code: -32000, message: `${code} (stage=${stage} reason=${reason})`, data: { stage, reason } };
 };
 
@@ -8957,7 +8973,16 @@ export const createDesktopOAuthMcpHandler = (nativeClient, {
       // Cancellation belongs to the caller, even when its reason resembles
       // a transport error. Only our own deadline earns the bootstrap fallback.
       if (signal?.aborted) throw normalizeAbortReason(signal);
-      const failure = codexCatalogTransportFailure(error);
+      // A build timeout is a local availability issue. Keep the recovery
+      // tools visible, but never classify it as missing authorization or
+      // publish a stale catalogue. Integrity/unknown vault failures stay closed.
+      const preparationTimeout = isCodex && codexKeychainPreparationTimeout(error);
+      // Refine the credential stage without resetting its elapsed time.
+      if (preparationTimeout) {
+        stage = "keychain_preparation";
+        observeStage?.(stage);
+      }
+      const failure = preparationTimeout || codexCatalogTransportFailure(error);
       if (failure) throw new CodexCatalogUnavailableError(failure, timing());
       throw error;
     }
@@ -9207,18 +9232,21 @@ export const createDesktopOAuthMcpHandler = (nativeClient, {
           ? result : textResult), isError: true });
       }
       const pairing = error?.code === "TRELIO_BRIDGE_PAIRING_REQUIRED" && error.pairing;
-      const code = typeof error?.code === "string" && /^[A-Z][A-Z0-9_]{2,127}$/u.test(error.code)
-        ? error.code : "TRELIO_CODEX_MCP_FAILED";
+      const preparationTimeout = isCodex && codexKeychainPreparationTimeout(error);
+      const code = preparationTimeout ? preparationTimeout.reason
+        : typeof error?.code === "string" && /^[A-Z][A-Z0-9_]{2,127}$/u.test(error.code)
+          ? error.code : "TRELIO_CODEX_MCP_FAILED";
       if (message.method !== "tools/call") return { jsonrpc: "2.0", id: message.id, error: { code: -32000, message: code } };
       if (authFailure(error)) toolsByName = null;
-      const reason = pairing ? "Вызовите approve_agent_workspace_bridge_pairing с этими полями. После подтверждения повторите исходный вызов один раз."
+      const reason = preparationTimeout ? preparationTimeout.message
+        : pairing ? "Вызовите approve_agent_workspace_bridge_pairing с этими полями. После подтверждения повторите исходный вызов один раз."
         : authFailure(error) ? (code === authRequired
           ? "Подключите Trelio через trelio_connect и продолжите исходный запрос."
           : "Повторно подтвердите доступ через trelio_connect с reauthorize=true и продолжите исходный запрос.")
         : error instanceof RemoteMcpHostError || error instanceof RemoteMcpOAuthError
           || (error instanceof TrelioCallTimeoutError && error.timeoutMs === TRELIO_NATIVE_SEARCH_CALL_BUDGET_MS) ? error.message
         : "Trelio не смог подготовить или завершить вызов. Для записи сначала проверьте состояние.";
-      const details = { code, message: reason, ...(pairing
+      const details = { code, message: reason, ...(preparationTimeout ? { stage: "keychain_preparation" } : {}), ...(pairing
         ? { pairingId: pairing.pairingId, deviceName: pairing.deviceName } : {}),
         ...(error instanceof RemoteMcpOAuthError && error.browser ? { browser: error.browser } : {}) };
       return reply({ ...buildTextResult(details),

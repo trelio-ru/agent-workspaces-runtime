@@ -106,11 +106,11 @@ export const createRemoteMcpOAuthVault = ({
   if (!credentialFile) throw new TypeError("OAuth credentialFile is required.");
   const file = path.join(path.dirname(credentialFile), "oauth-session.json");
 
-  const read = async (origin, resolved) => {
+  const read = async (origin, resolved, { signal } = {}) => {
     const account = remoteMcpOAuthSessionAccount(origin, resolved, namespace, nativeClient);
     let serialized = null;
     if (platform === "darwin") {
-      serialized = await keychain.read(KEYCHAIN_SERVICE, account);
+      serialized = await keychain.read(KEYCHAIN_SERVICE, account, { signal });
     } else if (platform === "win32") {
       const stored = await readPrivateJsonFile(file);
       if (stored?.account === account && typeof stored.ciphertext === "string") {

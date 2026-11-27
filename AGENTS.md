@@ -1742,8 +1742,11 @@ Exact legacy template bytes для распознавания при мигра�
   Фиксированные native connections Trelio запрашивают gzip для tools/list,
   wire/decoded size ограничены.
   Первый list имеет 25 с, обновление 45 с. Тайм-аут сохраняет закрытый этап.
-  Ошибка запуска Codex сохраняет закрытые stage/reason в обычном JSON-RPC
-  message для журнала клиента, включая типизированный macOS Keychain timeout.
+  Тайм-аут подготовки Keychain в Codex сохраняет recovery tools и отдельный
+  этап; тайм-аут запущенного helper остаётся на этапе credential_store.
+  Восстановление lock требует точной записи PID/nonce и ESRCH. Legacy lock
+  без владельца остаётся в старом кеше. Остальные ошибки запуска Codex
+  сохраняют закрытые stage/reason в JSON-RPC message для журнала клиента.
   Ни raw exception, ни вывод helper в startup error не передаются.
   Receipt подтверждает только count, наличие фиксированных read tools и отправку
   list_changed. Если Codex сохранил первый список, стабильный `trelio_read`

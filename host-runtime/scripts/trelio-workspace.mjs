@@ -65,6 +65,7 @@ import { TRELIO_PRE_TOOL_USE_MATCHER, inspectTrelioHookToolRouting } from "./tre
 import { diagnoseWindowsHookStartup } from "./trelio-hook-startup-diagnostic.mjs";
 import { constants as fsConstants, createReadStream, createWriteStream, watch as watchDirectory } from "node:fs";
 import fs from "node:fs/promises";
+import { setTimeout as delay } from "node:timers/promises";
 import http from "node:http";
 import os from "node:os";
 import path from "node:path";
@@ -2016,43 +2017,54 @@ const assertMacosKeychainHelperFile = async (filePath, expectedMode) => {
   }
 };
 
-const compileMacosBridgeKeychainHelper = async (sourceFile, outputFile, cwd) => {
+const MACOS_KEYCHAIN_PREPARATION_MS = 15_000;
+
+const keychainCompilationTimeout = () => new MacosKeychainHelperError(
+  "Истекло время сборки macOS Keychain helper.", "MACOS_KEYCHAIN_COMPILATION_TIMEOUT",
+);
+
+const compileMacosBridgeKeychainHelper = async (sourceFile, outputFile, cwd, deadline, signal) => {
   const environment = {
     PATH: "/usr/bin:/bin:/usr/sbin:/sbin",
     LANG: "en_US.UTF-8",
     HOME: os.homedir(),
     TMPDIR: os.tmpdir(),
   };
-  try {
-    await execFileAsync("/usr/bin/swiftc", ["-O", sourceFile, "-o", outputFile], {
+  const compile = async (compiler, args) => {
+    signal?.throwIfAborted();
+    const remainingMs = Math.ceil(deadline - performance.now());
+    if (remainingMs <= 0) throw keychainCompilationTimeout();
+    await execFileAsync(compiler, [...args, sourceFile, "-o", outputFile], {
       cwd,
       env: environment,
       encoding: "utf8",
       maxBuffer: 1024 * 1024,
+      // A blocked Xcode/Swift process must not retain the build claim forever.
+      // Both fixed compiler paths share the original deadline.
+      timeout: remainingMs,
+      killSignal: "SIGKILL",
+      signal,
+    }).catch(error => {
+      signal?.throwIfAborted();
+      if (error.killed && error.signal === "SIGKILL") throw keychainCompilationTimeout();
+      throw error;
     });
-    return;
-  } catch {
+  };
+  try {
+    await compile("/usr/bin/swiftc", ["-O"]);
+  } catch (error) {
+    signal?.throwIfAborted();
+    if (error instanceof MacosKeychainHelperError) throw error;
     // Full Xcode can temporarily block /usr/bin/swiftc while waiting for a
     // licence. The separately installed Apple Command Line Tools remain a
     // valid fixed-path compiler and SDK; never fall back to PATH/Homebrew.
     const commandLineTools = "/Library/Developer/CommandLineTools";
-    await execFileAsync(
+    await compile(
       path.join(commandLineTools, "usr", "bin", "swiftc"),
-      [
-        "-O",
-        "-sdk",
-        path.join(commandLineTools, "SDKs", "MacOSX.sdk"),
-        sourceFile,
-        "-o",
-        outputFile,
-      ],
-      {
-        cwd,
-        env: environment,
-        encoding: "utf8",
-        maxBuffer: 1024 * 1024,
-      },
-    ).catch((error) => {
+      ["-O", "-sdk", path.join(commandLineTools, "SDKs", "MacOSX.sdk")],
+    ).catch(error => {
+      signal?.throwIfAborted();
+      if (error instanceof MacosKeychainHelperError) throw error;
       throw new Error(
         "Не удалось подготовить системный macOS Keychain helper; legacy bridge device-session сохранена без изменений.",
         { cause: error },
@@ -2071,10 +2083,56 @@ export class MacosKeychainHelperError extends Error {
   }
 }
 
-const resolveMacosBridgeKeychainHelper = async () => {
+const keychainBuildLockOccupied = error => ["EEXIST", "ENOTEMPTY"].includes(error.code);
+
+const releaseMacosKeychainBuildLock = async (lockDirectory, ownerName) => {
+  try {
+    // Unlink only the observed generation. An atomic successor has its own
+    // nonce, and the non-recursive rmdir cannot remove a nonempty successor.
+    await fs.unlink(path.join(lockDirectory, ownerName));
+    await fs.rmdir(lockDirectory).catch(error => {
+      if (error.code !== "ENOENT" && !keychainBuildLockOccupied(error)) throw error;
+    });
+  } catch (error) {
+    if (error.code !== "ENOENT") throw error;
+  }
+};
+
+const recoverMacosKeychainBuildLock = async (lockDirectory) => {
+  try {
+    await assertPrivatePathKind(lockDirectory, "directory");
+    const entries = await fs.readdir(lockDirectory);
+    // An empty v2 claim can only be a release in progress. Atomic rename can
+    // replace it on the next iteration. Legacy mkdir claims live elsewhere.
+    if (!entries.length) return true;
+    const ownerName = entries[0];
+    const match = entries.length === 1 && /^([1-9]\d{0,9})-([a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12})\.json$/u.exec(ownerName);
+    if (!match) return false;
+    const pid = Number(match[1]);
+    if (isProcessRunning(pid)) return false;
+    const owner = await readPrivateJsonFile(path.join(lockDirectory, ownerName), { maximumBytes: 256 });
+    // ESRCH must still hold after validating the owner-only record. An
+    // unknown owner (including a reused live PID) never grants takeover.
+    if (owner?.pid !== pid || owner.id !== match[2] || isProcessRunning(pid)) return false;
+    await releaseMacosKeychainBuildLock(lockDirectory, ownerName);
+    return true;
+  } catch (error) {
+    if (error.code === "ENOENT") return true;
+    throw error;
+  }
+};
+
+export const resolveMacosBridgeKeychainHelper = async ({
+  cacheDirectory = MACOS_BRIDGE_KEYCHAIN_CACHE_DIRECTORY,
+  compile = compileMacosBridgeKeychainHelper,
+  timeoutMs = MACOS_KEYCHAIN_PREPARATION_MS,
+  signal,
+} = {}) => {
   if (!USE_MACOS_KEYCHAIN) {
     throw new Error("macOS Keychain недоступен для текущего bridge process.");
   }
+  const deadline = performance.now() + timeoutMs;
+  signal?.throwIfAborted();
   const sourceBytes = await fs.readFile(MACOS_BRIDGE_KEYCHAIN_SOURCE);
   const sourceDigest = crypto
     .createHash("sha256")
@@ -2082,19 +2140,14 @@ const resolveMacosBridgeKeychainHelper = async () => {
     .update(`\0${process.arch}\0v1`, "utf8")
     .digest("hex");
   sourceBytes.fill(0);
-  const buildDirectory = path.join(
-    MACOS_BRIDGE_KEYCHAIN_CACHE_DIRECTORY,
-    sourceDigest,
-  );
-  const executable = path.join(buildDirectory, "TrelioBridgeKeychain");
-  const manifestFile = path.join(buildDirectory, "build.json");
-  const lockDirectory = path.join(buildDirectory, "build.lock");
-
-  const readVerified = async () => {
+  const readVerified = async directory => {
+    const executable = path.join(directory, "TrelioBridgeKeychain");
+    const manifestFile = path.join(directory, "build.json");
     try {
+      await assertPrivatePathKind(directory, "directory");
       await assertMacosKeychainHelperFile(executable, 0o700);
       await assertMacosKeychainHelperFile(manifestFile, 0o600);
-      const manifest = await readPrivateJsonFile(manifestFile);
+      const manifest = await readPrivateJsonFile(manifestFile, { maximumBytes: 1024 });
       const binaryDigest = crypto
         .createHash("sha256")
         .update(await fs.readFile(executable))
@@ -2113,71 +2166,94 @@ const resolveMacosBridgeKeychainHelper = async () => {
     }
   };
 
-  await ensurePrivateDirectory(MACOS_BRIDGE_KEYCHAIN_CACHE_DIRECTORY);
+  await ensurePrivateDirectory(cacheDirectory);
+  // Keep a verified legacy executable at its original Keychain path. An
+  // empty legacy build.lock says nothing about its owner, so a cold build
+  // uses isolated output and never waits on or removes that legacy claim.
+  const legacy = await readVerified(path.join(cacheDirectory, sourceDigest));
+  if (legacy) return legacy;
+
+  const buildDirectory = path.join(cacheDirectory, `${sourceDigest}-v2`);
+  const readyDirectory = path.join(buildDirectory, "ready");
+  const lockDirectory = path.join(buildDirectory, "build.lock");
   await ensurePrivateDirectory(buildDirectory);
-  const existing = await readVerified();
+  const existing = await readVerified(readyDirectory);
   if (existing) return existing;
 
-  let ownsLock = false;
-  for (let attempt = 0; attempt < 100; attempt += 1) {
-    try {
-      await fs.mkdir(lockDirectory, { mode: 0o700 });
-      ownsLock = true;
-      break;
-    } catch (error) {
-      if (error.code !== "EEXIST") throw error;
-      const completed = await readVerified();
-      if (completed) return completed;
-      await wait(100);
-    }
-  }
-  if (!ownsLock) {
-    throw new MacosKeychainHelperError(
-      "Другой bridge process не завершил подготовку macOS Keychain helper.",
-      "MACOS_KEYCHAIN_PREPARATION_TIMEOUT",
-    );
-  }
-
-  const temporaryDirectory = path.join(
-    buildDirectory,
-    `build-${crypto.randomUUID()}`,
-  );
-  const temporaryExecutable = path.join(temporaryDirectory, "TrelioBridgeKeychain");
+  const id = crypto.randomUUID();
+  const ownerName = `${process.pid}-${id}.json`;
+  const temporaryDirectory = path.join(buildDirectory, `build-${id}`);
+  const stagedLock = path.join(temporaryDirectory, "claim");
+  const stagedBuild = path.join(temporaryDirectory, "ready");
   try {
-    await ensurePrivateDirectory(temporaryDirectory);
-    await compileMacosBridgeKeychainHelper(
-      MACOS_BRIDGE_KEYCHAIN_SOURCE,
-      temporaryExecutable,
-      temporaryDirectory,
-    );
-    await fs.chmod(temporaryExecutable, 0o700);
-    await assertMacosKeychainHelperFile(temporaryExecutable, 0o700);
-    const binaryDigest = crypto
-      .createHash("sha256")
-      .update(await fs.readFile(temporaryExecutable))
-      .digest("hex");
-    await fs.rename(temporaryExecutable, executable);
-    await writePrivateJsonFile(manifestFile, {
-      schemaVersion: 1,
-      sourceSha256: sourceDigest,
-      binarySha256: binaryDigest,
-    });
-    return await readVerified();
+    await ensurePrivateDirectory(stagedLock);
+    await writePrivateJsonFile(path.join(stagedLock, ownerName), { pid: process.pid, id });
+    for (;;) {
+      signal?.throwIfAborted();
+      const remainingMs = deadline - performance.now();
+      if (remainingMs < 1) {
+        throw new MacosKeychainHelperError(
+          "Истекло время ожидания блокировки сборки macOS Keychain helper.",
+          "MACOS_KEYCHAIN_PREPARATION_TIMEOUT",
+        );
+      }
+      try {
+        // The claim directory and a complete nonce record appear together.
+        // Death before the rename cannot leave an ownerless shared claim.
+        await fs.rename(stagedLock, lockDirectory);
+        break;
+      } catch (error) {
+        if (!keychainBuildLockOccupied(error)) throw error;
+        const completed = await readVerified(readyDirectory);
+        if (completed) return completed;
+        if (await recoverMacosKeychainBuildLock(lockDirectory)) continue;
+        await delay(Math.min(100, remainingMs), undefined, { signal });
+      }
+    }
+    try {
+      // The preceding owner may have published while this contender was
+      // waiting. Verify again with the lock before starting any compiler.
+      const completed = await readVerified(readyDirectory);
+      if (completed) return completed;
+      const temporaryExecutable = path.join(stagedBuild, "TrelioBridgeKeychain");
+      await ensurePrivateDirectory(stagedBuild);
+      await compile(MACOS_BRIDGE_KEYCHAIN_SOURCE, temporaryExecutable, stagedBuild, deadline, signal);
+      await fs.chmod(temporaryExecutable, 0o700);
+      await assertMacosKeychainHelperFile(temporaryExecutable, 0o700);
+      const binaryDigest = crypto.createHash("sha256").update(await fs.readFile(temporaryExecutable)).digest("hex");
+      await writePrivateJsonFile(path.join(stagedBuild, "build.json"), {
+        schemaVersion: 1,
+        sourceSha256: sourceDigest,
+        binarySha256: binaryDigest,
+      });
+      signal?.throwIfAborted();
+      if (performance.now() >= deadline) throw keychainCompilationTimeout();
+      // Publish the executable and manifest together. A crash leaves either
+      // an unpublished private staging tree or a complete verified cache.
+      await fs.rename(stagedBuild, readyDirectory);
+      return await readVerified(readyDirectory);
+    } finally {
+      await releaseMacosKeychainBuildLock(lockDirectory, ownerName);
+    }
   } finally {
     await fs.rm(temporaryDirectory, { recursive: true, force: true });
-    await fs.rm(lockDirectory, { recursive: true, force: true });
   }
 };
 
-const executeMacosBridgeKeychainHelper = async (requestPayload) => {
-  const executable = await resolveMacosBridgeKeychainHelper().catch(error => {
+const executeMacosBridgeKeychainHelper = async (requestPayload, signal) => {
+  const preparationSignal = trelioCallSignal(signal);
+  const executable = await resolveMacosBridgeKeychainHelper({ signal: preparationSignal }).catch(error => {
+    preparationSignal?.throwIfAborted();
     if (error instanceof MacosKeychainHelperError) throw error;
     throw new MacosKeychainHelperError(error.message, "MACOS_KEYCHAIN_PREPARATION_FAILED", { cause: error });
   });
+  preparationSignal?.throwIfAborted();
   return new Promise((resolve, reject) => {
     const child = spawn(executable, [], {
       shell: false,
       windowsHide: true,
+      signal,
+      killSignal: "SIGKILL",
       env: {
         PATH: "/usr/bin:/bin:/usr/sbin:/sbin",
         LANG: "en_US.UTF-8",
@@ -2213,6 +2289,7 @@ const executeMacosBridgeKeychainHelper = async (requestPayload) => {
 
     child.once("error", (error) => finish(() => {
       wipeChunks();
+      if (signal?.aborted) { reject(signal.reason); return; }
       reject(new MacosKeychainHelperError(
         "Не удалось запустить системный macOS Keychain helper.",
         "MACOS_KEYCHAIN_SPAWN_FAILED",
@@ -2220,6 +2297,7 @@ const executeMacosBridgeKeychainHelper = async (requestPayload) => {
       ));
     }));
     resultStream?.on("data", (chunk) => {
+      if (settled) return;
       resultBytes += chunk.length;
       if (resultBytes > 128 * 1024) {
         child.kill();
@@ -2273,7 +2351,7 @@ const executeMacosBridgeKeychainHelper = async (requestPayload) => {
   });
 };
 
-const readMacosBridgeSessionToken = async (service, origin) => {
+const readMacosBridgeSessionToken = async (service, origin, { signal } = {}) => {
   const response = await executeMacosBridgeKeychainHelper({
     operation: "get",
     service,
@@ -2281,7 +2359,7 @@ const readMacosBridgeSessionToken = async (service, origin) => {
     ...(MACOS_BRIDGE_KEYCHAIN_TEST_PATH
       ? { keychainPath: MACOS_BRIDGE_KEYCHAIN_TEST_PATH }
       : {}),
-  });
+  }, signal);
   if (response?.status === "not_found") return null;
   if (response?.status !== "ready" || typeof response.value !== "string") {
     throw new Error("macOS Keychain helper не подтвердил bridge device-session.");
