@@ -1994,6 +1994,9 @@ Exact legacy template bytes для распознавания при мигра�
 
 - Windows retention claim: bounded sharing retries before acquisition, during an unacquired atomic directory scan, and for removal of the same empty atomic claim. Private validation and protected operations never replay. See [mirror retention](docs/agent-workspace-runtime.md#mirror-retention).
 - Concurrent plugin-retention tests await both real publication finalizers before the next prune; file visibility alone is not completed verification. Keep EPERM/access-denial and observed-deletion cases separate.
+- Company search hydration tests advance the timer callbacks and monotonic
+  clock together after a poll is awaiting its response. The fixture retains
+  native Timeout.refresh semantics on Node 22.
 - Browser controller expiry fixtures advance their synthetic clock only after
   the real awaiting poll. Keep native ACL, cleanup, and effect counts.
 - Native scheduled-fixture start evidence is immutable JSON published under a

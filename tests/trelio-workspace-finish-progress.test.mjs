@@ -110,7 +110,42 @@ test("company search deadlines never slide across polls and stale recipients can
   await acl.close();
 });
 
-test("verified hydration extends observed search past idle, with a fixed overall deadline", async () => {
+test("verified hydration extends observed search past idle, with a fixed overall deadline", async t => {
+  let elapsedMs = 0;
+  const timers = new Set();
+  t.mock.method(performance, "now", () => elapsedMs);
+  // Node 22's mock Timeout.refresh is a no-op. Model a refreshed observer
+  // deadline on the same clock that the real search uses for idle accounting.
+  t.mock.method(globalThis, "setTimeout", (callback, milliseconds, ...args) => {
+    const timer = {
+      dueAt: elapsedMs + milliseconds,
+      fire: () => callback(...args),
+      refresh() { this.dueAt = elapsedMs + milliseconds; },
+      unref() {},
+    };
+    timers.add(timer);
+    return timer;
+  });
+  t.mock.method(globalThis, "clearTimeout", timer => timers.delete(timer));
+  const flush = () => new Promise(resolve => setImmediate(resolve));
+  const advance = async milliseconds => {
+    const end = elapsedMs + milliseconds;
+    for (;;) {
+      const next = [...timers].sort((left, right) => left.dueAt - right.dueAt)[0];
+      if (!next || next.dueAt > end) break;
+      elapsedMs = next.dueAt;
+      timers.delete(next);
+      next.fire();
+    }
+    elapsedMs = end;
+    await flush();
+  };
+  const waitForPreparing = async request => {
+    await flush(); // The poll must already be waiting before its clock moves.
+    await advance(searchOptions.waitMs);
+    return request;
+  };
+
   for (const outcome of ["complete", "idle", "unobserved", "deadline"]) {
     const completion = pending();
     let report;
@@ -125,15 +160,14 @@ test("verified hydration extends observed search past idle, with a fixed overall
     });
     try {
       const origin = "https://synthetic.invalid";
-      const first = await reader.read(origin, searchInput);
+      const first = await waitForPreparing(reader.read(origin, searchInput));
       const poll = () => reader.read(origin, first.nextCall.arguments.parameters, { operationId: first.operationId });
-      const wait = () => new Promise(resolve => setTimeout(resolve, 65));
       for (let i = 0; i < (["idle", "deadline"].includes(outcome) ? 2 : 3); i++) {
-        await wait();
+        await advance(65);
         report(outcome === "idle" ? "hydrating" : "hydration_progress");
-        if (outcome !== "unobserved") assert.equal((await poll()).progress.stage, "hydrating");
+        if (outcome !== "unobserved") assert.equal((await waitForPreparing(poll())).progress.stage, "hydrating");
       }
-      await new Promise(resolve => setTimeout(resolve, 145));
+      await advance(145);
       if (outcome === "complete") {
         completion.resolve(searchValue);
         assert.deepEqual(await poll(), searchValue.result);
