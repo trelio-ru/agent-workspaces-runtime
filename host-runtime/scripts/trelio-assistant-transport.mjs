@@ -4385,6 +4385,7 @@ export const createAssistantMcpClient = ({ origin, assistantId, deviceId, store,
           try{parseAssistantRunFileCommand(argumentsSnapshot.command);}
           catch{fail('ASSISTANT_WORKSPACE_FILE_INPUT_INVALID');}
         }
+        let ownerInputVersion;
         if(name==='use_assistant_browser'){
           // The complete browser command is conditional metadata, not another
           // always-loaded schema. Fetch its SAME native validator on every
@@ -4397,6 +4398,9 @@ export const createAssistantMcpClient = ({ origin, assistantId, deviceId, store,
           if(contract?.isError||contract?.structuredContent?.schemaVersion!==1
             ||contract.structuredContent.name!==name||!object(contract.structuredContent.inputSchema))fail('ASSISTANT_CAPABILITY_UNAVAILABLE');
           validateAssistantNativeInputShape(contract.structuredContent.inputSchema,argumentsSnapshot);
+          // Only a current backend can grant input for an ordinary owner
+          // intake. A host flag never upgrades an older read-only receipt.
+          if(argumentsSnapshot.intakePass&&contract.structuredContent.ownerInputVersion===1)ownerInputVersion=1;
         }
         if(name==='continue_assistant_workspace_action'&&argumentsSnapshot.operation==='external_account_admit'){
           if(!assistantExternalAccountAdmission(argumentsSnapshot.parameters))fail('ASSISTANT_MCP_INPUT_INVALID');
@@ -4493,7 +4497,8 @@ export const createAssistantMcpClient = ({ origin, assistantId, deviceId, store,
             runtimeSessionProof:argumentsSnapshot.runtimeSessionProof})
           :name==='use_assistant_browser'
           ?typeof materializeBrowser==='function'
-            ?await send({localBrowserAction:true,...(argumentsSnapshot.intakePass?{intakePass:argumentsSnapshot.intakePass}:{taskPass:argumentsSnapshot.taskPass}),runtimeSessionProof:argumentsSnapshot.runtimeSessionProof})
+            ?await send({localBrowserAction:true,...(argumentsSnapshot.intakePass?{intakePass:argumentsSnapshot.intakePass}:{taskPass:argumentsSnapshot.taskPass}),
+              runtimeSessionProof:argumentsSnapshot.runtimeSessionProof,...(ownerInputVersion===1?{ownerInputVersion}:{})})
             :fail('ASSISTANT_CAPABILITY_UNAVAILABLE')
           :typeof withWorkspaceArguments==='function'
           ?await localOperation('workspace_arguments',prepareArguments,nativeSendErrors)
@@ -4505,7 +4510,7 @@ export const createAssistantMcpClient = ({ origin, assistantId, deviceId, store,
           || (value.isError !== undefined && typeof value.isError !== "boolean")
           || JSON.stringify(value).includes(credential) || Buffer.byteLength(JSON.stringify(value)) > ASSISTANT_MCP_RESULT_MAX_BYTES) fail("ASSISTANT_MCP_INVALID_RESPONSE");
         if(name==='use_assistant_browser'&&value.isError!==true)
-          return localOperation('browser',()=>materializeBrowser({result:value,arguments:argumentsSnapshot,signal,admissionStartedAt:browserAdmissionStartedAt}));
+          return localOperation('browser',()=>materializeBrowser({result:value,arguments:argumentsSnapshot,signal,admissionStartedAt:browserAdmissionStartedAt,ownerInputVersion}));
         if(workspaceFileAction&&value.isError!==true)
           return localOperation('workspace_files',()=>materializeWorkspaceFiles({result:value,arguments:argumentsSnapshot,signal}));
         if(typeof onBrowserScopeSettled==='function'&&value.isError!==true

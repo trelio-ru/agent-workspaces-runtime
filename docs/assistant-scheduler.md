@@ -697,8 +697,15 @@ the monotonic clock before native HTTP and is checked again after private I/O;
 server/device wall-clock skew cannot renew or reject a fresh admission.
 The complete command is checked against
 that SAME fresh native schema before HTTP; URL/text/page data stay local in
-plain and encrypted companies. The receipt is not a provider/Secret/action grant.
+plain and encrypted companies. Provider commands, Secret checkout and sensitive
+actions require separate admission.
 The host checks its private active pass and observed session again before input.
+For verified private-owner intake, the host sends `ownerInputVersion: 1` only
+when the exact native contract advertises it. A fresh `ownerInputAllowed: true`
+receipt enables the existing click, type-text and key commands. The legacy
+`readOnly` bit still identifies the intake origin for compatibility and keeps
+the protected Secret channel task-only. Reply-only recovery and older backends
+or hosts retain navigation, screenshots, scroll, status and close.
 The compact initial browser definition defers its full command variants/policy
 to `get_trelio_tool_contract(name=use_assistant_browser)`. The host also fetches
 that exact current schema itself before every admission and validates the
@@ -4577,10 +4584,10 @@ private `kind:source_intake` journal admits context/resolve and the existing
 company_context READ catalogue for verified private-owner questions; normal
 task/Workspace/Secret tools cannot run under it. Already available external
 readers and assistant-owned browser sessions are also valid for a personal
-question under their existing ACL/login. Do not require a fictitious Task/Run
-for calendar/email/source reading, or infer missing browser access from the
-company MCP catalogue. This grants no new account, login, Secret or external
-mutation authority. Native original-body
+request under their existing ACL/login. Ordinary owner intake supports native
+browser input subject to the current receipt. Account setup, protected Secret
+input and sensitive external actions use their own admission. A real Task/Run
+is only needed by operations that depend on it. Native original-body
 confirmation is host-only and not a model tool. Genuine owner linked native IDs,
 current incoming/original message flags and source/project/company ACL are
 independent of natural command assessment. Clear owner commands need no second

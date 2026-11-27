@@ -1000,7 +1000,7 @@ export const materializeProductionAssistantCompanyFile = async ({identity,result
  * the existing owner-private browser transport, never native HTTP or a ledger.
  */
 export const materializeAssistantBrowser = async ({identity,host,store,result,arguments:args,signal,
-  admissionStartedAt,run,now=Date.now,monotonic=()=>performance.now()}) => {
+  admissionStartedAt,ownerInputVersion,run,now=Date.now,monotonic=()=>performance.now()}) => {
   const {validateAssistantActivePass}=await import('./trelio-assistant-hook.mjs');
   const {assistantVisualBrowserAccountId,observeAssistantManagedVisualTarget,runVisualSession}=await import('./trelio-visual-session.mjs');
   const {DEFAULT_LEASE_MS}=await import('./trelio-browser-session.mjs');
@@ -1013,7 +1013,10 @@ export const materializeAssistantBrowser = async ({identity,host,store,result,ar
   // access cannot revive or extend a receipt. No model argument supplies it.
   const admissionIsFresh=()=>{const elapsed=monotonic()-admissionStartedAt;
     return Number.isFinite(admissionStartedAt)&&Number.isFinite(elapsed)&&elapsed>=0&&elapsed<5000;};
-  if(!grant||Object.keys(grant).sort().join(',')!=='assistantUserId,companyId,deviceId,expiresAt,kind,memberId,readOnly,runtimeSessionId,schemaVersion,scopeId'
+  const ownerInputAllowed=pass.kind==='source_intake'&&ownerInputVersion===1&&grant?.ownerInputAllowed===true;
+  const grantKeys=['assistantUserId','companyId','deviceId','expiresAt','kind','memberId','readOnly','runtimeSessionId','schemaVersion','scopeId'];
+  if(ownerInputAllowed)grantKeys.push('ownerInputAllowed');
+  if(!grant||Object.keys(grant).sort().join(',')!==grantKeys.sort().join(',')
     ||grant.schemaVersion!==1||grant.kind!=='assistant_browser'||grant.assistantUserId!==identity.assistantId
     ||grant.deviceId!==identity.deviceId||grant.companyId!==pass.companyId||grant.scopeId!==pass.passId
     ||!uuid.test(grant.memberId??'')||!uuid.test(grant.runtimeSessionId??'')
@@ -1028,7 +1031,7 @@ export const materializeAssistantBrowser = async ({identity,host,store,result,ar
     ||!admissionIsFresh())failBrowser();
   const {operation,args:input}=args.command;
   if(!['navigate','screenshot','status','close','scroll','click','type-text','key'].includes(operation)
-    ||grant.readOnly&&!['navigate','screenshot','status','close','scroll'].includes(operation))
+    ||grant.readOnly&&!ownerInputAllowed&&!['navigate','screenshot','status','close','scroll'].includes(operation))
     throw new AssistantTransportError('ASSISTANT_BROWSER_READ_ONLY');
   let site;
   try {site=new URL(args.siteOrigin);
@@ -1053,6 +1056,8 @@ export const materializeAssistantBrowser = async ({identity,host,store,result,ar
   // presentation. Native JS dialogs remain observable through the same engine
   // without raising a window over the person's desktop. This is fixed host
   // policy, never a model flag or a fallback from another live presentation.
+  // A verified owner's browser input and task-only protected Secret fill
+  // are independently admitted. Only a task pass binds Secret observations.
   const visual=await (run??runVisualSession)({origins:[site.origin],externalNavigation:true,presentation:'hidden',
     ...(grant.readOnly?{}:{assistantBrowserSecrets:true}),operation,args:input,env:environment});
   const viewed=visualMcpResult(visual);

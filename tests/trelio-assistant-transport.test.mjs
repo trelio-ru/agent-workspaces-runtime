@@ -112,13 +112,16 @@ test('assistant file transport sends only structural Run admission and excludes 
  assert.equal(calls,1);assert.equal(materializations,1);
 });
 
-test('managed browser sends only structural admission and never replays an unknown local command',async()=>{
+for(const mode of ['task','owner','legacy_owner'])test(`managed browser sends only structural admission and never replays an unknown local command (${mode})`,async()=>{
  const origin='https://assistant.test',assistantId=randomUUID(),deviceId=randomUUID(),store=memoryStore();
  const credential=`tda_${'b'.repeat(43)}`,taskPass={companyId:randomUUID(),taskId:randomUUID(),passId:randomUUID()},runtimeSessionProof={runtimeSessionId:randomUUID()};
  await store.put({origin,kind:'device',id:assistantId},{assistantId,deviceId,credential,expiresAt:1});
- const args={siteOrigin:'https://private.example',command:{operation:'type-text',args:{frameId:'synthetic',text:'PRIVATE_INPUT'}},taskPass,runtimeSessionProof};
+ const scope=mode==='task'?{taskPass}:{intakePass:{companyId:taskPass.companyId,sourceId:randomUUID(),intakeId:randomUUID()}};
+ const supported=mode==='legacy_owner'?{}:{ownerInputVersion:1};
+ const negotiated=mode==='owner'?supported:{};
+ const args={siteOrigin:'https://private.example',command:{operation:'type-text',args:{frameId:'synthetic',text:'PRIVATE_INPUT'}},...scope,runtimeSessionProof};
  let admissions=0,executions=0,unknown=false,changedContract=false,nativeAdmissionAt;
- const canonical={type:'object',properties:{siteOrigin:{type:'string'},command:{type:'object'},taskPass:{},runtimeSessionProof:{}},required:['siteOrigin','command'],additionalProperties:false};
+ const canonical={type:'object',properties:{siteOrigin:{type:'string'},command:{type:'object'},taskPass:{},intakePass:{},runtimeSessionProof:{}},required:['siteOrigin','command'],additionalProperties:false};
  const wire={type:'object',anyOf:[canonical,{type:'object',properties:{localBrowserAction:{const:true},taskPass:{},intakePass:{},runtimeSessionProof:{}},additionalProperties:false}]};
  const httpRequest=async input=>{
   const response=result=>({sessionId:'fixture',message:{jsonrpc:'2.0',id:input.payload?.id,result}});
@@ -130,10 +133,10 @@ test('managed browser sends only structural admission and never replays an unkno
    assert.deepEqual(input.payload.params.arguments,{name:'use_assistant_browser'});
    assert.equal(input.config.headers['x-trelio-assistant-capability-profile'],'source_intake');
    const schema=changedContract?{...canonical,properties:{...canonical.properties,command:{type:'object',properties:{operation:{const:'navigate'}}}}}:canonical;
-   return response({content:[],structuredContent:{schemaVersion:1,name:'use_assistant_browser',inputSchema:schema}});
+   return response({content:[],structuredContent:{schemaVersion:1,name:'use_assistant_browser',inputSchema:schema,...supported}});
   }
   nativeAdmissionAt=performance.now();
-  admissions++;assert.deepEqual(input.payload.params.arguments,{localBrowserAction:true,taskPass,runtimeSessionProof});
+  admissions++;assert.deepEqual(input.payload.params.arguments,{localBrowserAction:true,...scope,runtimeSessionProof,...negotiated});
   assert.doesNotMatch(JSON.stringify(input.payload),/PRIVATE_INPUT|private\.example|frameId|type-text/u);
   return response({content:[{type:'text',text:'Native structural receipt'}],structuredContent:{kind:'assistant_browser'}});
  };
@@ -143,13 +146,13 @@ test('managed browser sends only structural admission and never replays an unkno
  await assert.rejects(closed.callTool('use_assistant_browser',args),/CAPABILITY_UNAVAILABLE/);assert.equal(admissions,0);
  const delivered={content:[{type:'image',mimeType:'image/png',data:'synthetic'}]};
  const client=createAssistantMcpClient({...options,materializeBrowser:async request=>{
-  executions++;assert.deepEqual(request.arguments,args);
+  executions++;assert.deepEqual(request.arguments,args);assert.equal(request.ownerInputVersion,negotiated.ownerInputVersion);
   assert.ok(Number.isFinite(request.admissionStartedAt)&&request.admissionStartedAt<=nativeAdmissionAt,
    'the trusted local deadline begins before native HTTP, never at callback arrival');
   if(unknown)throw new AssistantTransportError('ASSISTANT_BROWSER_OUTCOME_UNKNOWN');return delivered;
  }});
  const tool=(await client.listTools()).find(tool=>tool.name==='use_assistant_browser');
- assert.ok(tool);assert.doesNotMatch(JSON.stringify(tool.inputSchema),/localBrowserAction|taskPass|intakePass|runtimeSessionProof/u);
+ assert.ok(tool);assert.doesNotMatch(JSON.stringify(tool.inputSchema),/localBrowserAction|taskPass|intakePass|runtimeSessionProof|ownerInputVersion/u);
  assert.deepEqual(await client.callTool('use_assistant_browser',args),delivered);
  changedContract=true;await assert.rejects(client.callTool('use_assistant_browser',args),/INPUT_INVALID/);
  assert.equal(admissions,1,'a changed live command schema refuses before its native one-use admission');changedContract=false;
@@ -222,7 +225,7 @@ test('only a confirmed native outcome requests browser cleanup; cleanup failure 
  assert.doesNotMatch(JSON.stringify(result),/PRIVATE_CLEANUP_DETAIL/);
 });
 
-test('managed browser binds local profile and input to its genuine runtime, with strict private-owner read-only mode',async()=>{
+test('managed browser binds owner input to negotiated native admission and keeps protected input task-only',async()=>{
  const {materializeAssistantBrowser}=await import('../host-runtime/scripts/trelio-assistant-entry.mjs');
  const {visualStatus}=await import('../host-runtime/scripts/trelio-visual-result.mjs');
  const identity={origin:'https://assistant.test',assistantId:randomUUID(),deviceId:randomUUID()};
@@ -256,8 +259,21 @@ test('managed browser binds local profile and input to its genuine runtime, with
  await assert.rejects(invoke({operation:'screenshot',args:{}}),/ADMISSION_CHANGED/);assert.equal(ran,2);
  pass={schemaVersion:1,kind:'source_intake',assistantId:identity.assistantId,deviceId:identity.deviceId,companyId:pass.companyId,
   sourceId:randomUUID(),sourceRevision:0,passId:randomUUID(),deliveryId:randomUUID(),eventId:randomUUID(),threadId:randomUUID()};await save();
- for(const operation of ['click','type-text','key'])await assert.rejects(invoke({operation,args:{}}),/READ_ONLY/);
- await invoke({operation:'screenshot',args:{}});assert.equal(ran,3);
+ const ownerCommands=[
+  {operation:'click',args:{frameId:'frame',x:1,y:2}},
+  {operation:'type-text',args:{frameId:'frame',text:'synthetic query'}},
+  {operation:'key',args:{frameId:'frame',key:'Enter'}},
+ ];
+ for(const command of ownerCommands){
+  await assert.rejects(invoke(command),/READ_ONLY/);
+  await assert.rejects(invoke(command,{},{ownerInputVersion:1}),/READ_ONLY/);
+  await assert.rejects(invoke(command,{ownerInputAllowed:true}),/ADMISSION_CHANGED/);
+  await invoke(command,{ownerInputAllowed:true},{ownerInputVersion:1});
+  assert.equal(selected.operation,command.operation);
+  assert.deepEqual(selected.args,command.args);
+  assert.equal(selected.assistantBrowserSecrets,undefined,'owner input does not bind the protected Secret channel');
+ }
+ await invoke({operation:'screenshot',args:{}},{},{ownerInputVersion:1});assert.equal(ran,6);
  assert.equal(selected.env.TRELIO_SKILL_ACCOUNT_JSON,originalAccount,'same assistant/company/site can reuse its saved login across own passes');
  pass={...pass,companyId:randomUUID()};await save();await invoke({operation:'screenshot',args:{}});
  assert.notEqual(selected.env.TRELIO_SKILL_ACCOUNT_JSON,originalAccount,'company contexts never share a generic saved browser profile');

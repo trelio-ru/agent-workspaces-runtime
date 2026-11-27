@@ -387,6 +387,7 @@ for(const mode of ['owner','triage','source_with_task_grant','reply_only','both_
         }else{
           assert.match(canonical,/reply_owner in the original chat/u);
           assert.match(canonical,/exact targetSourceId/u);
+          assert.match(canonical,/Verified private-owner intake can also click, type and press keys/u);
           assert.doesNotMatch(canonical,/unsubscribeEventIds/u);
         }
       }}),
@@ -3080,7 +3081,8 @@ test('reply-only native recovery retains the structural intake ABI and queues on
  assert.match(input,/already available external sources/);
  assert.match(input,/Use use_assistant_browser for ordinary site work that needs no specialized capability or existing skill session/u);
  assert.match(input,/explicitly supported fallback admitted for this assistant/u);
- assert.match(input,/Source intake stays read-only/u);
+ assert.match(input,/Reply-only recovery keeps browser navigation, screenshots and scrolling/u);
+ assert.doesNotMatch(input,/Verified private-owner intake can also click/u);
  assert.match(input,/Do not use ordinary Chrome, native computer tools or a shell\/browser script as a silent fallback/u);
  assert.match(input,/closes idle windows after ten minutes/u);
  assert.match(input,/A personal question does not require a task or Workspace Run/);
@@ -3882,6 +3884,10 @@ test('native history selects only the exact interrupted scheduled review that ob
       result:request.method==='thread/read'?{thread:{id:threadId,cwd:process.cwd()}}:{data:[turn],nextCursor:null}}))});
   const selected=turn=>({state:'owner_question_observed',questionId,turnId:turn.id});
   const plain=makeRoot();assert.deepEqual(await read(plain),selected(plain));
+  const oldBrowserPrompt=makeRoot();
+  oldBrowserPrompt.items[0].content[0].text=assistantNativePrompt(deliveryId,scope,{}).replace(
+    'Close windows when this work finishes', 'Source intake stays read-only. Close windows when this work finishes');
+  assert.deepEqual(await read(oldBrowserPrompt),selected(oldBrowserPrompt),'exact older task prompts remain recoverable');
   const parameters={skillId:'signed-example',companyId:taskPass.companyId,projectId:randomUUID(),
     releaseId:randomUUID(),runtimeSessionId:randomUUID(),arguments:['read']};
   const stdout='Observed value',digest=value=>createHash('sha256').update(value).digest('hex');
@@ -3897,7 +3903,7 @@ test('native history selects only the exact interrupted scheduled review that ob
     const copy=structuredClone(observed);alter(copy.items.at(-1));assert.deepEqual(await read(copy),{state:'uncertain'});
   }
   const legacy=makeRoot();
-  legacy.items[0].content[0].text=assistantNativePrompt(deliveryId,scope,{}).replace(
+  legacy.items[0].content[0].text=oldBrowserPrompt.items[0].content[0].text.replace(
     ' If work needs broader company readings, get_assistant_status(view=company_context) displays the ordinary native source catalogue. Use view=task to restore task operations. Select the needed existing view yourself; presentation never changes authority.','');
   assert.deepEqual(await read(legacy),selected(legacy));
   legacy.items[0].content[0].text+='not part of the public release';
