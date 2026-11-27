@@ -249,6 +249,68 @@ test("local MCP delivers action-argument recovery without a diagnostic detour", 
   assert.equal(error.details.requiredAction, "execute_returned_action_arguments");
 });
 
+test("the local catalogue and dispatcher expose a standalone browser without OAuth or a selected skill", async () => {
+  const name = "use_trelio_browser";
+  const origin = "https://trelio.test";
+  const codex = { name: "codex-mcp-client" };
+  const threadId = "33333333-3333-7333-8333-333333333333";
+  const otherThread = "44444444-4444-7444-8444-444444444444";
+  const frameId = "55555555-5555-4555-8555-555555555555";
+  const calls = [], diagnostics = [];
+  const shared = { origin, codexMcpRuntime: true, clientInfo: codex,
+    browserConnectionId: "11111111-1111-4111-8111-111111111111",
+    loadCatalogPermissions: async () => { throw Error("no backend"); },
+    callTool: async () => assert.fail("the standalone browser cannot dispatch a skill or native tool"),
+    recordDiagnostic: (tool, args) => diagnostics.push({ tool, args }),
+    runBrowser: async options => {
+      calls.push(options);
+      return { kind: "trelio.visual-browser/v1", state: "ready", reason: "none" };
+    },
+  };
+  const catalogue = await handleLocalMcpMessage({ jsonrpc: "2.0", id: 1, method: "tools/list" }, shared);
+  const tool = catalogue.result.tools.find(tool => tool.name === name);
+  assert.ok(tool.inputSchema.properties.operation.enum.includes("click"));
+  assert.deepEqual(tool.inputSchema.required, ["operation"]);
+  assert.equal(tool.inputSchema.additionalProperties, false);
+
+  const dispatch = (thread, arguments_, overrides = {}) => handleLocalMcpMessage({
+    jsonrpc: "2.0", id: 2, method: "tools/call",
+    params: { name, _meta: { threadId: thread }, arguments: arguments_ },
+  }, { ...shared, ...overrides });
+  const click = { operation: "click", args: { frameId, x: 10, y: 20 } };
+  const navigation = await dispatch(threadId, { operation: "navigate", args: { url: "https://site.test/work" } });
+  assert.deepEqual(JSON.parse(navigation.result.content[0].text), { state: "ready", reason: "none" });
+  assert.equal((await dispatch(threadId, click)).result.isError, undefined);
+  await dispatch(otherThread, { operation: "status" });
+
+  assert.equal(calls[0].standaloneScope, calls[1].standaloneScope);
+  assert.notEqual(calls[0].standaloneScope, calls[2].standaloneScope);
+  assert.deepEqual(calls[0].origins, [origin]);
+  assert.equal(calls[0].externalNavigation, true);
+  assert.equal(calls[0].profileAuthentication, true);
+  assert.deepEqual(calls[1].args, click.args);
+  assert.match((await dispatch(undefined, click)).result.content[0].text, /TRELIO_BROWSER_SESSION_REQUIRED/u);
+  assert.match((await dispatch(threadId, click, { clientInfo: { name: "foreign-client" } })).result.content[0].text, /TRELIO_BROWSER_SESSION_REQUIRED/u);
+  for (const input of [
+    { ...click, threadId: otherThread },
+    { ...click, args: { ...click.args, url: "https://site.test" } },
+    { operation: "click", args: { frameId, x: 10 } },
+    { operation: "navigate", args: { url: origin, expectedDocumentUrl: origin } },
+    { operation: "upload-files", args: { files: ["/tmp/unapproved"] } },
+  ]) assert.match((await dispatch(threadId, input)).result.content[0].text, /invalid_input/u);
+  assert.equal(calls.length, 3);
+  assert.ok(diagnostics.every(event => event.tool === name && event.args === undefined));
+
+  const generic = { codexMcpRuntime: false, clientInfo: { name: "claude-code" } };
+  await dispatch(threadId, { operation: "status" }, generic);
+  await dispatch(otherThread, { operation: "close" }, generic);
+  await dispatch(threadId, { operation: "status" }, { ...generic, browserConnectionId: frameId });
+  // A non-Codex client cannot select its owner through Codex's metadata.
+  assert.equal(calls[3].standaloneScope, calls[4].standaloneScope);
+  assert.notEqual(calls[3].standaloneScope, calls[5].standaloneScope);
+  assert.notEqual(calls[3].standaloneScope, calls[0].standaloneScope);
+});
+
 test("parallel Codex open calls pass only their own native thread IDs to the bridge pipe", async () => {
   const tool = "continue_trelio_workspace_action";
   const workspaceId = "11111111-1111-4111-8111-111111111111";
@@ -5895,7 +5957,6 @@ test("local MCP initialize publishes the universal skill-first routing gate", as
     /Compatible personal connectors require searched skills \(legacy guidance\), hasMore=false, no usable match/u,
     /Control-plane outage is not an empty catalog; transient failure is not no_access\/setup_required/u,
     /Unknown mutation outcomes require read-back before retry or switching/u,
-    /Never bypass a working skill through browser\/HTTP\/another MCP\/script/u,
     /request_plugin_install before catalog discovery/u,
     /Явная development\/debug\/audit\/release задача в названном каноническом репозитории/u,
     /одного checkout мало/u,

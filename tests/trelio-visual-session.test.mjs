@@ -6,13 +6,13 @@ import path from 'node:path';
 import http from 'node:http';
 import { createHash, randomUUID } from 'node:crypto';
 import vm from 'node:vm';
-import { runVisualSession, withVisualOwnerFileLock, readVisualOwner,
+import { runStandaloneVisualBrowser, runVisualSession, withVisualOwnerFileLock, readVisualOwner,
   publishVisualWorkerOwner, visualSessionBinding, createVisualIdleSupervisor,
   VISUAL_IDLE_TIMEOUT_MS, closeVisualExecutionSessions, assistantVisualBrowserAccountId,
   createVisualControlServer, observeAssistantManagedVisualTarget, prepareAssistantManagedVisualSecret } from '../host-runtime/scripts/trelio-visual-session.mjs';
 import { browserExecutionDirectory } from '../host-runtime/scripts/trelio-browser-session.mjs';
 import { visualStatus } from '../host-runtime/scripts/trelio-visual-result.mjs';
-import { ProtectedVisualStore, visualStorageScope } from '../host-runtime/scripts/trelio-visual-store.mjs';
+import { ProtectedVisualStore, visualStandaloneStorageScope, visualStorageScope } from '../host-runtime/scripts/trelio-visual-store.mjs';
 import { loadVisualDependencies } from '../host-runtime/scripts/trelio-visual-bootstrap.mjs';
 import { resolveVisualWorkerNode } from '../host-runtime/scripts/trelio-visual-node.mjs';
 import { PROCESS_DIAGNOSTIC_CODES, ProcessDiagnosticError, parseProcessDiagnostic,
@@ -578,6 +578,66 @@ test('all signing and version discovery shares one non-sliding deadline', () => 
     run: () => { probes++; clock = 5001; return signingPolicy(false); },
   })), { code: 'VISUAL_BOOTSTRAP_NODE_REQUIRED' });
   assert.equal(probes, 1);
+});
+
+test('standalone browser opens a real page, hands off manual input and isolates another chat', {
+  skip: process.env.TRELIO_VISUAL_NATIVE_TEST !== '1', timeout: 180_000,
+}, async t => {
+  const directory = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'trelio-visual-standalone-')));
+  const seen = [];
+  let restoredCookie;
+  const server = http.createServer((req, res) => {
+    res.setHeader('Content-Type', 'text/html');
+    if (req.url === '/proof') {
+      seen.push(req.url);
+      res.setHeader('Set-Cookie', 'browser_fixture=kept; Path=/; HttpOnly');
+    }
+    if (req.url === '/restored') restoredCookie = req.headers.cookie;
+    res.end('<!doctype html><main style="height:1800px"><a href="/proof">Fixture link</a></main>');
+  });
+  const listener = ownFixtureHttpServer(server, t.signal);
+  await listener.listen();
+  const origin = `http://127.0.0.1:${server.address().port}`;
+  const owner = { kind: 'codex', id: randomUUID() };
+  const sibling = { kind: 'codex', id: randomUUID() };
+  const active = path.join(directory, 'visual-browser', visualStandaloneStorageScope({ origin, ...owner }), 'active');
+  const call = async (operation, args = {}, currentOwner = owner, signal = t.signal) => {
+    const result = await runStandaloneVisualBrowser({ origin, owner: currentOwner, input: { operation, args }, signal,
+      run: options => runVisualSession({ ...options, fixture: { directory, headless: process.env.TRELIO_VISUAL_FIXTURE_HEADLESS === '1' } }),
+    });
+    const [meta, image] = result.content;
+    return { ...JSON.parse(meta.text), image };
+  };
+  t.after(async () => {
+    await listener.stop();
+    await call('close', {}, owner, null).catch(() => {});
+    for (let i = 0; i < 160; i++) {
+      if (!await fs.stat(active).then(() => true, error => { if (error.code === 'ENOENT') return false; throw error; })) {
+        await fs.rm(directory, { recursive: true, force: true });
+        return;
+      }
+      await new Promise(resolve => setTimeout(resolve, 100));
+    }
+    throw new Error('Standalone fixture worker did not release its own claim');
+  });
+
+  assert.equal((await call('navigate', { url: origin })).state, 'preparing');
+  assert.equal((await call('wait')).state, 'ready');
+  assert.equal((await call('status', {}, sibling)).state, 'not_configured');
+  assert.equal((await call('screenshot', {}, sibling)).reason, 'session_closed');
+  const frame = await call('screenshot');
+  assert.equal(frame.image.type, 'image');
+  assert.equal(frame.image.mimeType, 'image/png');
+  assert.equal((await call('click', { frameId: frame.frameId, x: 24, y: 16 })).state, 'ready');
+  assert.deepEqual(seen, ['/proof']);
+  assert.equal((await call('click', { frameId: frame.frameId, x: 24, y: 16 })).reason, 'stale_frame');
+  assert.equal((await call('setup', { url: origin })).state, 'manual_input_required');
+  const manual = await call('screenshot');
+  assert.equal(manual.reason, 'manual_control_active');
+  assert.equal(manual.image, undefined);
+  assert.equal((await call('ready')).state, 'saved_unverified');
+  assert.equal((await call('navigate', { url: origin + '/restored' })).state, 'ready');
+  assert.equal(restoredCookie, 'browser_fixture=kept');
 });
 
 test('detached worker keeps its original lease and encrypted storage across short calls', { skip: process.env.TRELIO_VISUAL_NATIVE_TEST !== '1', timeout: 180_000 }, async t => {

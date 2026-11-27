@@ -9,10 +9,10 @@ import { fileURLToPath } from 'node:url';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { resolveWorkspaceBridgeConfigDirectory, readPrivateJsonFile, writePrivateJsonFile, assertPrivatePathKind, renderLocalFormPage, parseAgentSecretTotpValue, deriveAgentSecretTotp } from './trelio-workspace.mjs';
 import { prepareVisualPrivateDirectory, prepareVisualLockRoot, visualChildEnvironment, loadVisualDependencies } from './trelio-visual-bootstrap.mjs';
-import { visualGuestStorageScope, visualStorageScope, ProtectedVisualStore } from './trelio-visual-store.mjs';
+import { visualGuestStorageScope, visualStandaloneStorageScope, visualStorageScope, ProtectedVisualStore } from './trelio-visual-store.mjs';
 import { createVisualOriginPolicy, normalizeVisualAttachmentFilePolicy, normalizeVisualAttachmentRedirectDomains, normalizeVisualPickerPaths } from './trelio-visual-browser.mjs';
-import { visualStartupDiagnostic, visualStartupReason, validVisualArguments, visualStatus, validateVisualCommandResult } from './trelio-visual-result.mjs';
-import { readBrowserSessionBinding, browserExecutionOwner, browserExecutionDirectory, withBrowserAccountState } from './trelio-browser-session.mjs';
+import { visualStartupDiagnostic, visualStartupReason, validVisualArguments, visualMcpResult, visualStatus, validateVisualCommandResult } from './trelio-visual-result.mjs';
+import { DEFAULT_LEASE_MS, readBrowserSessionBinding, browserExecutionOwner, browserExecutionDirectory, withBrowserAccountState } from './trelio-browser-session.mjs';
 import { resolveVisualWorkerNode } from './trelio-visual-node.mjs';
 import { nodeChildEnvironment } from './trelio-local-path.mjs';
 import { withMirrorRetentionLock } from './trelio-mirror-retention.mjs';
@@ -389,12 +389,53 @@ export function normalizeVisualManualCompletion(value, { origins, fixtureOnly = 
   }) };
 }
 
+const standaloneEmptyCommands = new Set(['wait', 'status', 'screenshot', 'show-login', 'ready', 'close']);
+const standaloneInputCommands = new Set(['click', 'scroll', 'type-text', 'key']);
+
+function validStandaloneVisualCommand(operation, args) {
+  if (!args || typeof args !== 'object' || Array.isArray(args)) return false;
+  if (standaloneEmptyCommands.has(operation)) return Object.keys(args).length === 0;
+  if (!validVisualArguments(operation, args)) return false;
+  if (operation === 'navigate' || operation === 'setup') {
+    return Object.keys(args).length === 1 && typeof args.url === 'string'
+      && args.url.length > 0 && args.url.length <= 4096;
+  }
+  if (!standaloneInputCommands.has(operation) || typeof args.frameId !== 'string' || !uuid.test(args.frameId))
+    return false;
+  if (operation === 'type-text') return typeof args.text === 'string' && args.text.length > 0 && args.text.length <= 4000;
+  if (operation === 'key') return typeof args.key === 'string' && args.key.length > 0 && args.key.length <= 32;
+  const coordinate = value => Number.isSafeInteger(value) && value >= 0;
+  const delta = value => Number.isInteger(value) && Math.abs(value) <= 1600;
+  return coordinate(args.x) && coordinate(args.y)
+    && (operation === 'click' || (delta(args.deltaY) && (args.deltaX === undefined || delta(args.deltaX))));
+}
+
+/** Native MCP owns the session identity. The model supplies a browser command
+ * only, so the standalone tool has no way to select a skill profile or pass. */
+export async function runStandaloneVisualBrowser({ origin, owner, input, signal, run = runVisualSession }) {
+  const { operation, args = {} } = input ?? {};
+  if (typeof input !== 'object' || !input || Array.isArray(input)
+      || Object.keys(input).some(key => !['operation', 'args'].includes(key))
+      || typeof operation !== 'string' || !validStandaloneVisualCommand(operation, args))
+    return visualMcpResult(visualStatus('error', 'invalid_input'));
+
+  signal?.throwIfAborted();
+  const scope = visualStandaloneStorageScope({ origin, ...owner });
+  // The browser starts with an ordinary web policy. Full-profile persistence
+  // applies only to this isolated browser and supports sign-in redirects across
+  // sites. Its scope, policy and clock are host-owned, never tool arguments.
+  const result = await run({ origins: [origin], externalNavigation: true, profileAuthentication: true,
+    standaloneScope: scope, operation, args, signal });
+  signal?.throwIfAborted();
+  return visualMcpResult(result);
+}
+
 /**
  * Short-lived provider invocations talk to one private, absolute-lease worker.
  * Its random bearer token is written only through host-private storage and is
  * never returned to MCP, placed in argv, inherited by Chromium or logged.
  */
-export async function runVisualSession({ origins, domains = [], externalNavigation: requestedExternalNavigation, profileAuthentication = false, operation, args = {}, observationMode = 'image', presentation = 'windowed', semanticControls = false, fieldCheckPolicy = null, referenceRoutes = [], attachmentDownloads = false, attachmentRedirectDomains = [], attachmentFilePolicy = null, audioDownloads = false, fileUploads = false, fileUploadPickerPaths = [], authentication = null, manualCompletion = null, assistantBrowserSecrets = false, env = process.env, fixture }) {
+export async function runVisualSession({ origins, domains = [], externalNavigation: requestedExternalNavigation, profileAuthentication = false, operation, args = {}, observationMode = 'image', presentation = 'windowed', semanticControls = false, fieldCheckPolicy = null, referenceRoutes = [], attachmentDownloads = false, attachmentRedirectDomains = [], attachmentFilePolicy = null, audioDownloads = false, fileUploads = false, fileUploadPickerPaths = [], authentication = null, manualCompletion = null, assistantBrowserSecrets = false, env = process.env, fixture, standaloneScope, signal }) {
   // New browser owners use the existing full web mode, including ordinary
   // links, redirects and the browser's attachment commands. An explicit
   // policy from an older signed caller remains a choice for that caller.
@@ -429,7 +470,15 @@ export async function runVisualSession({ origins, domains = [], externalNavigati
     || operation === 'navigate' && args.expectedDocumentUrl !== args.url
     || operation === 'read-text' && (Object.keys(args).some(key => !['expectedDocumentUrl','offset'].includes(key))
       || Object.hasOwn(args, 'offset') && (!Number.isInteger(args.offset) || args.offset < 0 || args.offset > 100_000)))) return visualStatus('error', 'invalid_input');
-  const binding = visualSessionBinding(env);
+  // A standalone scope already identifies one local MCP session and carries
+  // no company/member or provider identity. Keep skill binding and storage
+  // derivation untouched; standalone commands cannot activate those features.
+  if (standaloneScope !== undefined && (!/^[0-9a-f]{64}$/u.test(standaloneScope)
+    || assistantBrowserSecrets || authentication || manualCompletion || attachmentDownloads || audioDownloads || fileUploads))
+    return visualStatus('error', 'invalid_input');
+  const binding = standaloneScope
+    ? { scope: standaloneScope, bindingHash: hash(['standalone-browser/v1', standaloneScope]), deadlineAt: Date.now() + DEFAULT_LEASE_MS }
+    : visualSessionBinding(env);
   if (typeof assistantBrowserSecrets !== 'boolean'
     || assistantBrowserSecrets && (binding.skillId !== 'assistant-browser' || !binding.executionOwner
     || presentation !== 'hidden' || requestedExternalNavigation !== true || authentication))
@@ -447,7 +496,8 @@ export async function runVisualSession({ origins, domains = [], externalNavigati
   // invocation cannot enable fixture controls or select an arbitrary root.
   const configDirectory = fixture?.directory || resolveWorkspaceBridgeConfigDirectory();
   const accountDirectory = path.join(configDirectory, 'visual-browser', binding.scope);
-  const directory = browserExecutionDirectory(accountDirectory, env);
+  const directory = standaloneScope ? accountDirectory : browserExecutionDirectory(accountDirectory, env);
+  signal?.throwIfAborted();
   let startupStage = 'owner_prepare';
   try {
     await prepareVisualPrivateDirectory(directory);
@@ -505,7 +555,8 @@ export async function runVisualSession({ origins, domains = [], externalNavigati
       if (Number.isInteger(owner.port) && owner.port > 0 && owner.port < 65536) {
         try {
           if (operation !== 'disconnect') {
-            const result = await request(owner, operation, args);
+            signal?.throwIfAborted();
+            const result = await request(owner, operation, args, signal);
             if (result.attachmentDiagnostic && env.TRELIO_SKILL_VISUAL_ATTACHMENT_DIAGNOSTICS !== '1') {
               // A stale MCP parser knows only stage. Strip newer details
               // after validating the worker response, without retrying it.
@@ -559,6 +610,7 @@ export async function runVisualSession({ origins, domains = [], externalNavigati
     // The common account transaction also excludes an explicit disconnect
     // while another chat reserves its worker; browser work stays outside it.
     const claimed = await withBrowserAccountState(accountDirectory, async () => {
+      signal?.throwIfAborted();
       try { await fs.mkdir(active, { mode: 0o700 }); }
       catch (error) { if (error.code === 'EEXIST') return false; throw error; }
       await prepareVisualPrivateDirectory(active);
@@ -567,7 +619,7 @@ export async function runVisualSession({ origins, domains = [], externalNavigati
         ...(binding.executionOwner ? { executionOwner: binding.executionOwner } : {}),
         pid: process.pid, token: crypto.randomBytes(32).toString('hex'),
         origins, domains, externalNavigation, profileAuthentication, directory: configDirectory, operation, args, observationMode, presentation, semanticControls, fieldCheckPolicy, referenceRoutes, attachmentDownloads, attachmentRedirectDomains, attachmentFilePolicy, audioDownloads, fileUploads, fileUploadPickerPaths, authentication, authenticationFingerprint, manualCompletion,
-        mailIdentity: { origin: binding.origin, companyId: binding.companyId, memberId: binding.memberId, scope: binding.scope },
+        ...(!standaloneScope ? { mailIdentity: { origin: binding.origin, companyId: binding.companyId, memberId: binding.memberId, scope: binding.scope } } : {}),
         ...(assistantBrowserSecrets === true ? { assistantBrowserSecrets: true } : {}),
         ...(fixture ? { allowLoopback: true, testHeadless: fixture.headless === true } : {}),
       };

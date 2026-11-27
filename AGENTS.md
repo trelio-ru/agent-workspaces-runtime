@@ -1816,6 +1816,10 @@ Exact legacy template bytes для распознавания при мигра�
 - Production loader передаёт exact `TRELIO_PLUGIN_ROOT`,
   `TRELIO_PLUGIN_VERSION`, `TRELIO_HOST_RUNTIME_VERSION` и immutable runtime
   source directory. Runtime не предполагает совместное source tree.
+- [Standalone browser MCP](docs/visual-browser.md#standalone-browser) reuses
+  the visual engine with a native chat/connection owner and its own encrypted
+  profile. Test ordinary catalogue/call dispatch, cross-owner isolation and
+  the real manual handoff. No skill selection or business Run for this tool.
 - Caller browser continuation stays lazy inside `trelio-browser-session.mjs`;
   preserve the signed package's 100-file ceiling and verify the actual packaged
   loader chain, not only source imports.

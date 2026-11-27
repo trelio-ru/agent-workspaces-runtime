@@ -72,6 +72,15 @@ export function visualGuestStorageScope({ origin, skillId, companyId, memberId }
   return visualScopeKey(origin, skillId, ['guest/v1', companyId, memberId]);
 }
 
+// Ordinary MCP sessions cannot locate a skill or assistant profile, even if
+// their native conversation ID matches a provider-side account identifier.
+export function visualStandaloneStorageScope({ origin, kind, id }) {
+  if (!['codex', 'stdio'].includes(kind) || typeof id !== 'string'
+      || !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu.test(id))
+    throw invalid('VISUAL_IDENTITY_INVALID');
+  return visualScopeKey(origin, 'standalone-browser', ['local-mcp/v1', kind, id.toLowerCase()]);
+}
+
 /**
  * A device-local AEAD snapshot, with the random key held by the native OS
  * credential service. The verified host binds it to a personal account or

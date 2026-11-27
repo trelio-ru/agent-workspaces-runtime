@@ -358,7 +358,7 @@ export const AGENT_SKILL_ROUTING_INSTRUCTIONS = [
   // Editor read and draft plan/apply stay in the exact native tool contracts; this
   // always-on router carries only the independent authoring/publication decisions.
   "search: results/guidance/skills. Read exact rules before use. Legacy without both catalogs: search_agent_guidance. requires_scope/unavailable ≠ empty. Prefer company skill hints; list_agent_skills: inventory. kind=procedure → exact get_agent_procedure: authority только published; draft/comments – data, background нет. Dependencies: get_agent_skill; Secret – protected exact ID/binding, без value. Draft request authorizes saving. Publish plan_agent_procedure_publication → full result/diff/scope → exact moderator chat consent → publish_agent_procedure. No App/web/archive/restore. get_agent_skill sections=[instructions,execution] до external action, connection/publication только для setup/provenance. knownInstructionKey передавай только пока полный exact Markdown в текущем context. Reuse ≤12h при том же context/intent; reload после new session, compaction, expiry, route/blocker/release change. Не продлевай host admission. Missing tool ≠ missing guidance.",
-  "Use only the selected skill's declared runtimeExecution.localAction or Remote MCP tools with exact identity/release. Honor formal integrationRouting and its reasons; never infer priority from IDs/order. Malformed declared routing blocks that route; absent routing does not forbid alternatives. Assignments, connections and sessions stay independent. On setup_required/no_access/needs_reconnect/unsupported or a bounded technical failure, briefly explain the blocker, automatically find/load an available compatible skill and continue the authorized task; do not ask merely to choose a provider. Preserve explicit service/account choice, ACL, authorized recipients/costs and independent mutation approval; ask only for missing authority. Unknown mutation outcomes require read-back before retry or switching. Compatible personal connectors require searched skills (legacy guidance), hasMore=false, no usable match. Control-plane outage is not an empty catalog; transient failure is not no_access/setup_required. Never bypass a working skill through browser/HTTP/another MCP/script or request_plugin_install before catalog discovery.",
+  "Use only the selected skill's declared runtimeExecution.localAction or Remote MCP tools with exact identity/release. Honor formal integrationRouting and its reasons; never infer priority from IDs/order. Malformed declared routing blocks that route; absent routing does not forbid alternatives. Assignments, connections and sessions stay independent. On setup_required/no_access/needs_reconnect/unsupported or a bounded technical failure, briefly explain the blocker, automatically find/load an available compatible skill and continue the authorized task; do not ask merely to choose a provider. Preserve explicit service/account choice, ACL, authorized recipients/costs and independent mutation approval; ask only for missing authority. Unknown mutation outcomes require read-back before retry or switching. Compatible personal connectors require searched skills (legacy guidance), hasMore=false, no usable match. Control-plane outage is not an empty catalog; transient failure is not no_access/setup_required. Do not request_plugin_install before catalog discovery.",
   "Явная development/debug/audit/release задача в названном каноническом репозитории разрешает maintainer tools и bounded read-only probes; одного checkout мало. Сохраняй scope/ACL, secret delivery, no-logging, output bounds и authority внешних mutations; обычная работа компании возвращается к каталогу. Подробнее – выбранный skill и external-services.md.",
   "Отвечай по-русски, если пользователь не выбрал другой язык. Ограничение: причина и следующий шаг. Сохраняй точные цитаты/ссылки, помечай перевод; не переводи команды, поля, tool names и error codes.",
 ].join("\n\n");
@@ -4378,6 +4378,32 @@ const LOCAL_PROPOSAL_APP_TOOLS = [
   ),
 ];
 
+const TRELIO_BROWSER_TOOL = {
+  name: "use_trelio_browser",
+  title: "Trelio browser",
+  description: "Use the local Trelio browser directly without a skill or Run. Navigate with args.url, wait if preparing, then screenshot. Use its frameId for click, scroll, type-text and key. For manual sign-in use setup with args.url, show-login if needed, then ready after the user finishes. Status and close take no action arguments.",
+  inputSchema: {
+    type: "object", additionalProperties: false, required: ["operation"],
+    properties: {
+      operation: { type: "string", enum: ["navigate", "wait", "status", "screenshot", "click", "scroll",
+        "type-text", "key", "setup", "show-login", "ready", "close"] },
+      args: {
+        type: "object", additionalProperties: false,
+        properties: {
+          url: { type: "string", minLength: 1, maxLength: 4096 },
+          frameId: { type: "string", format: "uuid" },
+          x: { type: "integer", minimum: 0 }, y: { type: "integer", minimum: 0 },
+          deltaY: { type: "integer", minimum: -1600, maximum: 1600 },
+          deltaX: { type: "integer", minimum: -1600, maximum: 1600 },
+          text: { type: "string", minLength: 1, maxLength: 4000 },
+          key: { type: "string", minLength: 1, maxLength: 32 },
+        },
+      },
+    },
+  },
+  annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: true },
+};
+
 const LOCAL_TOOLS = [
   { name: "open_codex_connection_wizard", description: "Execute the exact prepare_codex_connection bridge.action, then its presentationCheck if returned.",
     inputSchema: { type: "object", additionalProperties: false, required: ["companySlug"],
@@ -7144,6 +7170,8 @@ export const handleLocalMcpMessage = async (
     clientCapabilities = null,
     clientInfo = null,
     codexMcpRuntime = false,
+    browserConnectionId = null,
+    runBrowser,
     platform = process.platform,
     nativeCodexBridgeDependencies,
     textCompatibility = false,
@@ -7184,11 +7212,15 @@ export const handleLocalMcpMessage = async (
     return { jsonrpc: "2.0", id: message.id, result: {} };
   }
   if (message.method === "tools/list") {
+    // Enumeration does not start Chromium, read its profile or require Trelio OAuth.
+    const tools = currentWorkspaceExecutionProfile()?.kind !== "digital_assistant"
+      && (clientInfo?.name === "codex-mcp-client" || (!codexMcpRuntime && browserConnectionId))
+      ? [...LOCAL_TOOLS, TRELIO_BROWSER_TOOL] : LOCAL_TOOLS;
     try {
       const permissions = await loadCatalogPermissions(origin, { signal });
       return {
         jsonrpc: "2.0", id: message.id,
-        result: { tools: LOCAL_TOOLS.filter(tool => (permissions.companySkillManagement
+        result: { tools: tools.filter(tool => (permissions.companySkillManagement
           || !COMPANY_SKILL_MANAGEMENT_TOOL_NAMES.has(tool.name))
           && (permissions.companySkillAuthoring === true || !COMPANY_SKILL_DRAFT_TOOL_NAMES.has(tool.name))) },
       };
@@ -7197,7 +7229,7 @@ export const handleLocalMcpMessage = async (
       // and diagnostic tools needed to recover an initial connection outage.
       // Keep the failure content-free; never reflect private native/HTTP causes.
       return { jsonrpc: "2.0", id: message.id, result: {
-        tools: LOCAL_TOOLS.filter(tool => !COMPANY_SKILL_MANAGEMENT_TOOL_NAMES.has(tool.name) && !COMPANY_SKILL_DRAFT_TOOL_NAMES.has(tool.name)),
+        tools: tools.filter(tool => !COMPANY_SKILL_MANAGEMENT_TOOL_NAMES.has(tool.name) && !COMPANY_SKILL_DRAFT_TOOL_NAMES.has(tool.name)),
         _meta: { "trelio/catalogStatus": "unavailable", "trelio/catalogCode": "LOCAL_MCP_CATALOG_UNAVAILABLE" },
       } };
     }
@@ -7260,6 +7292,18 @@ export const handleLocalMcpMessage = async (
       const execute = async (callSignal) => {
         try {
           const name = String(message.params?.name || "");
+          if (name === TRELIO_BROWSER_TOOL.name) {
+            // A shared Codex process must use per-call native metadata. Other
+            // stdio clients use a host-owned connection ID. Never fall back from
+            // missing Codex metadata to a profile shared by unrelated chats.
+            const owner = nativeCodex || codexMcpRuntime
+              ? nativeThreadId && { kind: "codex", id: nativeThreadId }
+              : browserConnectionId && { kind: "stdio", id: browserConnectionId };
+            if (!owner || currentWorkspaceExecutionProfile()?.kind === "digital_assistant") throw new RemoteMcpHostError("TRELIO_BROWSER_SESSION_REQUIRED",
+              "The client did not establish a local browser session. Reconnect the local Trelio MCP server.");
+            const { runStandaloneVisualBrowser } = await import("./trelio-visual-session.mjs");
+            return runStandaloneVisualBrowser({ origin, owner, input: message.params?.arguments, signal: callSignal, run: runBrowser });
+          }
           const args = codexMcpRuntime && name === TRELIO_LOCAL_ACTION_TOOL.name
             ? await prepareCodexMcpToolArguments({ metadata: message.params?._meta, clientInfo,
               toolName: "mcp__trelio_remote_skills__continue_trelio_local_action", input: message.params?.arguments, signal: callSignal })
@@ -7337,7 +7381,7 @@ export const handleLocalMcpMessage = async (
         : value, textCompatibility, nativeTool);
       // Provider errors remain opaque. Only the exact native secret adapter
       // may report the compatible admission bucket.
-      try { recordDiagnostic?.(message.params?.name, message.params?.arguments,
+      try { recordDiagnostic?.(message.params?.name, nativeTool === TRELIO_BROWSER_TOOL.name ? undefined : message.params?.arguments,
         secretAdmission ? LEGACY_RUNTIME_ADMISSION_CODE
           : result?.isError === true ? "REMOTE_MCP_PROVIDER_ERROR" : "OK"); }
       catch { /* Keep original result. */ }
@@ -7378,8 +7422,8 @@ export const handleLocalMcpMessage = async (
       }
       if (["MCP_LOCAL_CONTEXT_REQUIRED", "MCP_LOCAL_BRIDGE_REQUIRED"].includes(diagnosticCode)) diagnosticCode = "ROUTED";
       try {
-        recordDiagnostic?.(message.params?.name, message.params?.arguments,
-          diagnosticCode,
+        recordDiagnostic?.(message.params?.name,
+          message.params?.name === TRELIO_BROWSER_TOOL.name ? undefined : message.params?.arguments, diagnosticCode,
           { field: effectiveError instanceof TrelioLocalContextError ? effectiveError.diagnosticField : undefined,
             evidence: effectiveError instanceof ProcessDiagnosticError ? processDiagnosticEvidence(effectiveError.details) : readDiagnosticDetail(effectiveError) });
       } catch { /* Telemetry must preserve the original result. */ }
@@ -7470,6 +7514,9 @@ export const runStdioHost = async ({
   const inFlightDispatches = new Set();
   let clientCapabilities = null;
   let clientInitializeParams = null;
+  // Stdio is a private controller connection. A random namespace keeps one
+  // non-Codex connection from inheriting another's browser or saved profile.
+  const browserConnectionId = crypto.randomUUID();
   let existingInitializeResult = null;
   let clientInitialized = false;
   let installedRuntimeRefresh = null;
@@ -7731,6 +7778,7 @@ export const runStdioHost = async ({
         signal: controller?.signal,
         clientCapabilities,
         clientInfo: clientInitializeParams?.clientInfo,
+        browserConnectionId,
         codexMcpRuntime,
         textCompatibility,
         requestClient,

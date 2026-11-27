@@ -232,6 +232,13 @@
       "maxBytes": 3200,
       "baselineTokens": 751,
       "maxTokens": 752
+    },
+    "use_trelio_browser": {
+      "modelVisible": true,
+      "baselineBytes": 1212,
+      "maxBytes": 1232,
+      "baselineTokens": 303,
+      "maxTokens": 312
     }
   }
 }
