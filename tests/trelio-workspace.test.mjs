@@ -23,6 +23,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import { promisify } from "node:util";
 import { applyTrelioFolderOnboarding, prepareTrelioFolderOnboarding } from "../host-runtime/scripts/trelio-folder-onboarding.mjs";
 import { ACCOUNT_SETUP_REQUIRED_BRIDGE_EXIT } from "../host-runtime/scripts/trelio-skill-accounts.mjs";
+import { saveNativeCodexBridge, withNativeCodexBridge } from "../host-runtime/scripts/trelio-codex-bridge-session.mjs";
 
 const TEST_AGENT_RULES_MARKDOWN = "# Platform rules\n\nUse exact typed actions.\n";
 const TEST_AGENT_RULES_SHA256 = createHash("sha256")
@@ -1044,13 +1045,9 @@ test("runtime-host upgrade remains a runtime error and does not trigger plugin r
 
 test("runtime-host gate refreshes the signed runtime and re-dispatches the exact bridge command", async () => {
   const calls = [];
-  const threadId = "019f9fcd-899a-72b3-91f6-fdf3134381bb";
-  const rawArguments = ["skill", "run", "--codex-skill-thread-input", "--", "account", "list"];
-  const received = [];
   const spawnProcess = (command, argumentsList, options) => {
     calls.push({ command, argumentsList, options });
     const child = new EventEmitter();
-    child.stdin = Object.assign(new EventEmitter(), { end: input => received.push(input) });
     queueMicrotask(() => { child.emit("exit", 0, null); child.emit("close", 0, null); });
     return child;
   };
@@ -1062,8 +1059,7 @@ test("runtime-host gate refreshes the signed runtime and re-dispatches the exact
     { minimumRuntimeVersion: "2.3.1" },
   );
   const recovery = await recoverBridgeHostRuntimeUpgrade(error, {
-    rawArguments,
-    input: threadId,
+    rawArguments: ["open", "--workspace", "workspace-id"],
     environment: {
       TRELIO_PLUGIN_ROOT: path.join(path.sep, "trusted", "plugin"),
       TRELIO_HOST_RUNTIME_VERSION: "2.2.3",
@@ -1081,10 +1077,12 @@ test("runtime-host gate refreshes the signed runtime and re-dispatches the exact
     "__update",
   ]);
   assert.equal(calls[0].options.env.TRELIO_HOST_RUNTIME_UPDATE_WAIT_FOR_LOCK, "1");
-  assert.deepEqual(calls[0].options.stdio, ["ignore", "ignore", "pipe"]);
-  assert.deepEqual(calls[1].argumentsList.slice(1), ["bridge", ...rawArguments]);
-  assert.deepEqual(calls[1].options.stdio, ["pipe", "inherit", "inherit"]);
-  assert.deepEqual(received, [threadId]);
+  assert.deepEqual(calls[1].argumentsList.slice(1), [
+    "bridge",
+    "open",
+    "--workspace",
+    "workspace-id",
+  ]);
   assert.equal(calls[1].options.env.TRELIO_HOST_RUNTIME_UPDATE_REEXEC, "1");
   assert.equal(calls[1].options.env.TRELIO_HOST_RUNTIME_DISABLE_AUTO_UPDATE, "1");
 });
@@ -8695,6 +8693,33 @@ test("Windows DPAPI protects and restores a bridge session for the current user"
       return true;
     },
   );
+});
+
+test("Windows DPAPI reopens the exact native Codex bridge from a second storage root", {
+  skip: process.platform !== "win32",
+}, async () => {
+  const homeDirectory = await mkdtemp(path.join(os.tmpdir(), "trelio-codex-bridge-session-"));
+  const origin = "https://dpapi-native-codex.test";
+  const threadId = "019f9fcd-899a-72b3-91f6-fdf3134381bc";
+  const runtimeSessionId = "4843b6cb-29db-47f4-a209-ee24b24518bd";
+  const bridgeDirectory = path.join(homeDirectory, "remote", "Trelio", "workspace-bridge");
+  const localBridgeDirectory = path.join(homeDirectory, "local", "Trelio", "workspace-bridge");
+  const token = "twb_windows-original-bridge";
+  try {
+    const ciphertext = await protectWindowsBridgeSessionToken(origin, token);
+    await writePrivateJsonFile(path.join(bridgeDirectory, "credentials.json"), { [origin]: {
+      bridgeSessionTokenProtected: { schemaVersion: 1, provider: "windows-dpapi-current-user", ciphertext },
+    } });
+    await saveNativeCodexBridge({ origin, threadId, runtimeSessionId, bridgeDirectory,
+      expiresAt: new Date(Date.now() + 60_000).toISOString() }, { homeDirectory, writePrivateJsonFile });
+    const { loadToken } = await import(pathToFileURL(bridgePath).href);
+    const loaded = await withNativeCodexBridge({ origin, threadId, runtimeSessionId }, () => loadToken(origin), {
+      homeDirectory, localBridgeDirectory, readPrivateJsonFile,
+    });
+    assert.ok(loaded === token, "DPAPI returned the registered bridge's original token");
+  } finally {
+    await rm(homeDirectory, { recursive: true, force: true, maxRetries: 4, retryDelay: 100 });
+  }
 });
 
 // Storage migrations are local operations. Exercise the exported reader rather

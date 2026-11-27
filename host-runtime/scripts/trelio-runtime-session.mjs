@@ -11,6 +11,7 @@
 import crypto from "node:crypto";
 import { AsyncLocalStorage } from "node:async_hooks";
 import { saveRuntimeChatBinding, runtimeChatBindingPath } from "./trelio-runtime-chat-binding.mjs";
+import { saveNativeCodexBridge } from "./trelio-codex-bridge-session.mjs";
 import { saveRuntimeProofBinding, runtimeProofBindingPath } from "./trelio-runtime-proof-preparation.mjs";
 import { buildDiagnosticObservation, observationCode } from "./trelio-diagnostic-observation.mjs";
 import { writeDiagnosticJournal } from "./trelio-diagnostic-journal.mjs";
@@ -803,7 +804,7 @@ const shouldDenyNativeProposalRenderer = async ({ origin, toolName, toolInput })
   return false;
 };
 
-const runPreToolUse = async (hookInput, emit = emitHookOutput) => {
+const runPreToolUse = async (hookInput, emit = emitHookOutput, { shareBridgeSession = false } = {}) => {
   const identity = resolveTrelioHookToolIdentity(hookInput);
   if (identity.status === "invalid") throw new TrelioHookToolIdentityError(identity.reason);
   if (identity.status === "unrelated") return;
@@ -890,6 +891,14 @@ const runPreToolUse = async (hookInput, emit = emitHookOutput) => {
     origin, runtimeSessionId: state.runtimeSessionId, clientSessionId,
     clientFamily: state.observation?.clientFamily, expiresAt: state.expiresAt,
     readPrivateJsonFile: bridge.readPrivateJsonFile, writePrivateJsonFile: bridge.writePrivateJsonFile });
+  if (process.platform === "win32" && shareBridgeSession) {
+    // The trusted remote transport owns the credential that registered this
+    // observation. The local MCP reuses that store for any continuation which
+    // carries the issued session, independently of the originating tool.
+    await saveNativeCodexBridge({ origin, threadId: clientSessionId, runtimeSessionId: state.runtimeSessionId,
+      expiresAt: state.expiresAt, bridgeDirectory: bridge.resolveWorkspaceBridgeConfigDirectory() },
+    { writePrivateJsonFile: bridge.writePrivateJsonFile }).catch(() => undefined);
+  }
   const updatedInput = await manageInstructionKeys({
     hookInput, identity, input: toolInput, boundary: state.instructionContext,
   });
@@ -978,19 +987,19 @@ export const observeCodexMcpTurn = (metadata, clientInfo, now = new Date()) => {
 export const cleanNativeRuntimeToolArguments = (input) => Object.fromEntries(Object.entries(input ?? {}).filter(([key]) =>
   !["runtimeSessionProof", "knownInstructionRevisionKey", "knownInstructionLayerKeys", "knownInstructionKey"].includes(key)));
 
-export const prepareCodexMcpToolArguments = ({ metadata, clientInfo, toolName, input, signal }) => {
+export const prepareCodexMcpToolArguments = ({ metadata, clientInfo, toolName, input, signal, shareBridgeSession = false }) => {
   const evidence = observeCodexMcpTurn(metadata, clientInfo);
   const cleaned = cleanNativeRuntimeToolArguments(input);
   // The existing backend still decides whether the current company requires
   // evidence. A missing observation never reuses an injected legacy proof.
   if (!evidence) return withoutModelInstructionKeys(cleaned,
     resolveTrelioHookToolIdentity({ tool_name: toolName, tool_input: cleaned }));
-  return prepareObservedRuntimeToolArguments({ ...evidence, toolName, input, signal,
+  return prepareObservedRuntimeToolArguments({ ...evidence, toolName, input, signal, shareBridgeSession,
     codexCallId: metadata.callId, codexVersion: metadata["x-codex-turn-metadata"].codex_version });
 };
 
 const prepareObservedRuntimeToolArguments = async ({
-  sessionId, observation, toolName, input, signal, codexCallId, codexVersion,
+  sessionId, observation, toolName, input, signal, codexCallId, codexVersion, shareBridgeSession,
 }) => {
   // Shared preparation keeps proposal files, private continuation recovery,
   // registration, refresh and proof renewal behind the same existing boundary.
@@ -1021,7 +1030,7 @@ const prepareObservedRuntimeToolArguments = async ({
         nativeCleanupAfter = Date.now() + 30 * 60_000;
         await cleanupStaleRuntimeSessions().catch(() => undefined);
       }
-      return runPreToolUse(hookInput, emit);
+      return runPreToolUse(hookInput, emit, { shareBridgeSession });
     }), deadline);
   return updated;
 };

@@ -400,7 +400,7 @@ export const createCompanySearchOperations = ({ authorize, execute, validate, cl
  * The optional stdin is a bounded typed assistant envelope, never a native
  * credential or checkpoint secret transport. Ordinary human finish is unchanged.
  */
-export const runWorkspaceFinishProcess = (executable, args, { cwd, signal, onProgress, input,
+export const runWorkspaceFinishProcess = (executable, args, { cwd, signal, onProgress, input, env,
   maximumCharacters = 1024 * 1024 }) => new Promise((resolve, reject) => {
   // Only the trusted skill worker opts into the existing visual envelope's
   // 3 MiB bound. Ordinary finish keeps its 1 MiB tail; no caller can request an
@@ -408,7 +408,7 @@ export const runWorkspaceFinishProcess = (executable, args, { cwd, signal, onPro
   if (![1024 * 1024, 3 * 1024 * 1024].includes(maximumCharacters)) {
     reject(new Error("Invalid Workspace process output bound.")); return;
   }
-  const child = spawn(executable, args, { cwd, signal, windowsHide: true, stdio: [input === undefined ? "ignore" : "pipe", "pipe", "pipe"] });
+  const child = spawn(executable, args, { cwd, signal, env, windowsHide: true, stdio: [input === undefined ? "ignore" : "pipe", "pipe", "pipe"] });
   let stdout = "", stderr = "", failure = null;
   const parse = createFinishProgressParser(onProgress, (text) => { stderr = sliceUtf16CodePoints(stderr + text, -maximumCharacters); });
   child.stdout.setEncoding("utf8");

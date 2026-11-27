@@ -2,7 +2,7 @@
 import { sliceUtf16CodePoints, readUtf16TextChunk } from "./trelio-context-search-matching.mjs";
 import { AGENT_SKILL_GUIDES_MINIMUM_HOST, normalizeAgentSkillInstructions, normalizeAgentSkillRoutingSummary, AgentSkillInstructionBudgetError, readAgentSkillSourceMetadata } from "./trelio-agent-skill-budget.mjs";
 import { buildLocalTaskReadToolResult, fitsMcpTaskReadResult } from "./trelio-task-read-budget.mjs";
-import { rememberCodexSkillBridge } from "./trelio-codex-skill-bridge.mjs";
+import { withNativeCodexBridge } from "./trelio-codex-bridge-session.mjs";
 import { localSearchSelections, selectedSearchLocator } from "./trelio-search-selection.mjs";
 import { createMcpStartupTrace } from "./trelio-mcp-startup-trace.mjs";
 import { withBrowserAccountState, skillResourcePolicy } from "./trelio-browser-session.mjs";
@@ -7074,6 +7074,8 @@ export const handleLocalMcpMessage = async (
     clientCapabilities = null,
     clientInfo = null,
     codexMcpRuntime = false,
+    platform = process.platform,
+    nativeCodexBridgeDependencies,
     textCompatibility = false,
     requestClient = null,
     confirmHarnessBrowser = null,
@@ -7179,12 +7181,11 @@ export const handleLocalMcpMessage = async (
       // call. A shared MCP process cannot use its inherited environment or an
       // ID supplied in tool arguments to identify the current chat.
       const nativeCodex = clientInfo?.name === "codex-mcp-client";
-      const codexThreadId = nativeCodex && (message.params?.name === "open_codex_connection_wizard"
+      const nativeThreadId = nativeCodex ? normalizeCodexNavigationThreadId(message.params?._meta?.threadId) : null;
+      const codexThreadId = (message.params?.name === "open_codex_connection_wizard"
         || message.params?.name === CODEX_CONNECTION_PRESENTATION
-        || (message.params?.name === TRELIO_WORKSPACE_ACTION_TOOL.name
-          && (message.params?.arguments?.operation === "open"
-            || (codexMcpRuntime && message.params?.arguments?.operation === "skill_run"))))
-        ? normalizeCodexNavigationThreadId(message.params?._meta?.threadId)
+        || (message.params?.name === TRELIO_WORKSPACE_ACTION_TOOL.name && message.params?.arguments?.operation === "open"))
+        ? nativeThreadId
         : null;
       const execute = async (callSignal) => {
         try {
@@ -7193,11 +7194,20 @@ export const handleLocalMcpMessage = async (
             ? await prepareCodexMcpToolArguments({ metadata: message.params?._meta, clientInfo,
               toolName: "mcp__trelio_remote_skills__continue_trelio_local_action", input: message.params?.arguments, signal: callSignal })
             : message.params?.arguments;
-          return await callTool(origin, name, args,
+          const dispatch = () => callTool(origin, name, args,
             { signal: callSignal, proposalProviderSelectionRecorder, proposalCapabilityConfigDirectory, clientCapabilities, textCompatibility, codexMcpRuntime,
               requestClient, codexLegacyMcpMigration, confirmHarnessBrowser, ...(codexThreadId ? { codexThreadId } : {}),
               ...(nativeCodex && (name === "open_codex_connection_wizard" || name === TRELIO_INSTALLATION_DIAGNOSTIC_TOOL_NAME)
                 ? { codexFolderSetupClient: true } : {}) });
+          const isContinuation = name === TRELIO_WORKSPACE_ACTION_TOOL.name || name === TRELIO_LOCAL_ACTION_TOOL.name;
+          if (codexMcpRuntime && platform === "win32" && nativeThreadId && isContinuation
+            && args?.schemaVersion === 1 && args.parameters?.runtimeSessionId) {
+            return await withNativeCodexBridge({ origin, threadId: nativeThreadId,
+              runtimeSessionId: args.parameters.runtimeSessionId }, dispatch, nativeCodexBridgeDependencies ?? {
+              localBridgeDirectory: resolveWorkspaceBridgeConfigDirectory(), readPrivateJsonFile,
+            });
+          }
+          return await dispatch();
         } catch (error) {
           // A verified pre-dispatch upgrade is the only safe automatic replay.
           // Recovery spends this SAME call budget; a stalled update must not
@@ -9373,6 +9383,7 @@ export const createDesktopOAuthMcpHandler = (nativeClient, {
           try {
             args = await prepare({
               metadata, clientInfo, toolName: `mcp__trelio__${name}`, input: args, signal: callSignal,
+              shareBridgeSession: true,
             });
           } catch (error) {
             // Only a typed failure during local preparation can establish
@@ -9389,13 +9400,6 @@ export const createDesktopOAuthMcpHandler = (nativeClient, {
         }
         const result = await connection.call(name, args, callSignal, isCodex ? undefined : requestClient);
         if (!isCodex) return result;
-        if (process.platform === "win32" && name === "get_agent_skill" && args.runtimeSessionProof) {
-          await rememberCodexSkillBridge({
-            origin: DEFAULT_ORIGIN, codexThreadId: normalizeCodexNavigationThreadId(metadata?.threadId),
-            proof: args.runtimeSessionProof, result, bridgeDirectory: resolveWorkspaceBridgeConfigDirectory(),
-            writePrivateJsonFile,
-          });
-        }
         const admission = readNativeRuntimeAdmissionError(result);
         const missingObservation = !args.runtimeSessionProof && admission?.reason === "missing";
         const details = codexRuntimeAdmissionPayload(admission, missingObservation);

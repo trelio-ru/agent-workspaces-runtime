@@ -3,6 +3,7 @@ import { readUtf16TextChunk, sliceUtf16CodePoints } from "./trelio-context-searc
 import { MCP_UNFILED_CONTEXT_RESPONSE_TOOLS } from "./trelio-unfiled-response-policy.mjs";
 import { readUnfiledResponseContext } from "./trelio-unfiled-context.mjs";
 import { createWorkspaceFinishOperations, createCompanySearchOperations, runWorkspaceFinishProcess } from "./trelio-workspace-finish-progress.mjs";
+import { nativeCodexBridge, nativeCodexBridgeChildEnvironment } from "./trelio-codex-bridge-session.mjs";
 import { trelioCallSignal, parseTrelioCallTimeout, withPrivateProcessSession } from "./trelio-hook-private-session.mjs";
 import {
   MIRROR_SCHEMA_VERSION, pruneMirrorSchema, withCompanyMirrorRetentionLock as withMirrorRetentionLock,
@@ -3642,8 +3643,10 @@ const resolveLocalCompanyProvider = async ({
   existingOnly = IS_HUMAN_SEARCH_READER,
 }) => {
   const cacheKey = companyContextSessionKey(origin, companySlug);
-  const managed = currentWorkspaceExecutionProfile()?.kind === "digital_assistant";
-  if (!managed && allowCached && !requirePlain && localCompanyProviderCache.has(cacheKey)) {
+  // A provider retained by company alone may carry a different bridge. Both
+  // managed and bound Codex invocations keep their credentials invocation-local.
+  const cacheable = !nativeCodexBridge() && currentWorkspaceExecutionProfile()?.kind !== "digital_assistant";
+  if (cacheable && allowCached && !requirePlain && localCompanyProviderCache.has(cacheKey)) {
     return localCompanyProviderCache.get(cacheKey);
   }
   // Detached read preparation cannot initiate pairing or migrate credentials.
@@ -3680,7 +3683,7 @@ const resolveLocalCompanyProvider = async ({
     // A managed profile/opaque token dies with ONE invocation. Persist only
     // the SAME encrypted generation, never its decrypted RAM/token/key object
     // in the interactive human's long-lived provider/session cache.
-    if (!managed) localCompanyProviderCache.set(cacheKey, provider);
+    if (cacheable) localCompanyProviderCache.set(cacheKey, provider);
     return provider;
   }
   return {
@@ -10525,15 +10528,16 @@ const normalizeGitHead = (value, fieldName) => {
   return head;
 };
 
-const runLocalProcess = async (executable, argumentsList, { cwd, signal, input, onProgress } = {}) => {
+const runLocalProcess = async (executable, argumentsList, { cwd, signal, input, onProgress, env } = {}) => {
   // Resolve the invocation signal here as well as at HTTP dispatch: a late
   // filesystem continuation must not spawn a writer after its MCP timeout.
   signal = trelioCallSignal(signal);
   signal?.throwIfAborted();
-  if (onProgress) return runWorkspaceFinishProcess(executable, argumentsList, { cwd, signal, onProgress });
+  if (onProgress) return runWorkspaceFinishProcess(executable, argumentsList, { cwd, signal, onProgress, env });
   const pending = execFileAsync(executable, argumentsList, {
     ...(cwd ? { cwd } : {}),
     ...(signal ? { signal } : {}),
+    ...(env ? { env } : {}),
     encoding: "utf8",
     maxBuffer: 4 * 1024 * 1024,
     windowsHide: true,
@@ -10602,6 +10606,7 @@ const runWorkspaceBridge = async (origin, argumentsList, options = {}) => {
       buildWorkspaceBridgeProcessArguments(origin, argumentsList),
       {
         ...options,
+        ...(nativeCodexBridge() ? { env: nativeCodexBridgeChildEnvironment() } : {}),
         // A plugin update can unlink the long-lived MCP host's cwd while the
         // loaded module and its exact installed path remain usable. Give every
         // bridge child an explicit cwd instead of inheriting that stale inode.
@@ -11804,7 +11809,6 @@ const executeTrelioWorkspaceActionOperation = async (
     selectOpenRecovery,
     codexThreadId = null,
     managedBrowserFill = false,
-    platform = process.platform,
   } = {},
 ) => {
   const invocation = buildTrelioWorkspaceActionInvocation(rawInput, { managedBrowserFill });
@@ -11844,18 +11848,16 @@ const executeTrelioWorkspaceActionOperation = async (
         invocation.operation === "open" ? invocation.parameters : undefined,
       );
     }
-    // The native chat ID travels only in the private bridge pipe. For a
-    // signed skill it selects the same bridge that supplied the exact skill
-    // action, even when the two Codex processes have different Windows roots.
+    // Keep the ID out of model-visible arguments, child argv and persisted
+    // Run metadata. Only open consumes this pipe. Automatic reclaim reuses
+    // the exact original open and its private input in this process.
     const openInput = invocation.operation === "open" && !invocation.parameters.runtimeSessionId
       ? codexThreadId ?? undefined : undefined;
-    const skillInput = platform === "win32" && invocation.operation === "skill_run" && invocation.parameters.runtimeSessionId
-      ? codexThreadId ?? undefined : undefined;
-    const bridgeArguments = [...invocation.argumentsList];
-    if (openInput) bridgeArguments.push("--codex-navigation-input");
-    if (skillInput) bridgeArguments.splice(bridgeArguments.indexOf("--"), 0, "--codex-skill-thread-input");
+    const bridgeArguments = openInput
+      ? [...invocation.argumentsList, "--codex-navigation-input"]
+      : invocation.argumentsList;
     const input = invocation.parameters.nativeInput
-      ? JSON.stringify(invocation.parameters.nativeInput) : openInput ?? skillInput;
+      ? JSON.stringify(invocation.parameters.nativeInput) : openInput;
     const result = await runBridge(origin, bridgeArguments, {
       ...(workingDirectory ? { cwd: workingDirectory } : {}),
       signal,
