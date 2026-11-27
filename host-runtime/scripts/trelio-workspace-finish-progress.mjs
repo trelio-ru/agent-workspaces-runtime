@@ -118,6 +118,7 @@ export const createWorkspaceFinishOperations = ({ waitMs = 10_000, retentionMs =
       if (entry && entry.id === id && entry.scope === scope) await entry.done;
     },
     has(key, id) { return entries.get(key)?.id === id; },
+    hasRetainedOperations() { prune(); return entries.size > 0; },
     active(key) { const entry = entries.get(key); return entry?.state === "running" ? snapshot(entry) : null; },
     async start({ key, scope, fingerprint, pollAction, execute, signal, background = false, initialWaitMs = waitMs }) {
       signal?.throwIfAborted();
@@ -373,6 +374,7 @@ export const createCompanySearchOperations = ({ authorize, execute, validate, cl
         throw error;
       }
     },
+    hasRetainedOperation() { return current !== null; },
     async close() {
       closed = true;
       if (current) await retire(current);

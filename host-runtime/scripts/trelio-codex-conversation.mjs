@@ -604,6 +604,8 @@ export const confirmDesktopBrowser = async (origin, { companySlug, provider, run
 const wizardCapabilities = new Map();
 const wizardBusy = new Set();
 const WIZARD_LIFETIME_MS = 30 * 60 * 1000;
+export const hasLiveCodexConnectionWizard = () => wizardBusy.size > 0
+  || [...wizardCapabilities.values()].some(capability => capability.expiresAt > Date.now());
 const WIZARD_PRESENTATION_WAIT_MS = 8_000;
 const object = value => value && typeof value === "object" && !Array.isArray(value);
 const safeFolderPath = value => typeof value === "string" && value.length <= 4096

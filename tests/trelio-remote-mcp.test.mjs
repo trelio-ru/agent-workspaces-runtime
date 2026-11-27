@@ -1378,6 +1378,89 @@ test("runtime handoff is limited to the two pre-operation compatibility gates", 
   ), false);
 });
 
+test("Codex switches an idle MCP to the installed runtime without resending tool calls", async () => {
+  const oldCalls = [];
+  const forwarded = [];
+  const { promise: oldCallEntered, resolve: enterOldCall } = Promise.withResolvers();
+  const { promise: finishOldCall, resolve: settleOldCall } = Promise.withResolvers();
+  let installed = "3.0.3";
+  let oauthPending = true;
+  let starts = 0;
+  let closed = false;
+  const handleMessage = async (message, { clientCapabilities }) => {
+    if (message.method === "initialize") return {
+      jsonrpc: "2.0", id: message.id,
+      result: {
+        protocolVersion: message.params.protocolVersion,
+        serverInfo: { name: "Trelio", version: "3.0.3" },
+        capabilities: { tools: { listChanged: true } },
+      },
+    };
+    if (message.method !== "tools/call") return null;
+    oldCalls.push(message);
+    if (message.id === 3) {
+      enterOldCall();
+      await finishOldCall;
+    }
+    assert.deepEqual(clientCapabilities, { resources: {} });
+    return { jsonrpc: "2.0", id: message.id, result: {} };
+  };
+  handleMessage.hasPendingOAuth = () => oauthPending;
+  const harness = createStdioHarness(() => assert.fail("wrong handler"), {
+    environment: {
+      TRELIO_HOST_RUNTIME_VERSION: "3.0.3",
+      TRELIO_PLUGIN_ROOT: path.join(os.tmpdir(), "trelio-plugin"),
+    },
+    codexMcpRuntime: true,
+    runtimeArguments: ["--codex", "remote"],
+    readInstalledVersion: async () => installed,
+    handleMessage,
+    startRuntimeDelegate: async ({ currentRuntimeVersion, existingInitializeResult, enqueueResponse }) => {
+      starts++;
+      assert.equal(currentRuntimeVersion, "3.0.3");
+      assert.equal(existingInitializeResult.protocolVersion, "2025-06-18");
+      return {
+        runtimeVersion: "3.0.4",
+        isReady: () => true,
+        forward: async message => {
+          forwarded.push(message);
+          await enqueueResponse({ jsonrpc: "2.0", id: message.id, result: {} });
+        },
+        close: async () => { closed = true; },
+      };
+    },
+  });
+  try {
+    const frame = (id, method, params) => ({ jsonrpc: "2.0", id, method, params });
+    const read = id => frame(id, "tools/call", { name: "get_task", arguments: { taskNumber: id } });
+    harness.send(frame(1, "initialize", { protocolVersion: "2025-06-18", capabilities: { resources: {} } }));
+    await harness.waitForFrame(({ id }) => id === 1);
+    harness.send({ jsonrpc: "2.0", method: "notifications/initialized" });
+    installed = "3.0.4";
+    harness.send(read(2));
+    await harness.waitForFrame(({ id }) => id === 2);
+    oauthPending = false;
+    harness.send(read(3));
+    await oldCallEntered;
+    harness.send(read(4));
+    await harness.waitForFrame(({ id }) => id === 4);
+    assert.equal(starts, 0);
+    settleOldCall();
+    await harness.waitForFrame(({ method }) => method === "notifications/tools/list_changed");
+    const write = frame(5, "tools/call", { name: "create_comment", arguments: { clientRequestId: "one" },
+      _meta: { threadId: "opaque" } });
+    harness.send(write);
+    await harness.waitForFrame(({ id }) => id === 5);
+    assert.equal(starts, 1);
+    assert.deepEqual(oldCalls, [read(2), read(3), read(4)]);
+    assert.deepEqual(forwarded, [write]);
+  } finally {
+    settleOldCall();
+    await harness.close();
+  }
+  assert.equal(closed, true);
+});
+
 test("runtime gate delegates the rejected call and the rest of the MCP session", async () => {
   const forwarded = [];
   let delegateClosed = false;
@@ -1592,7 +1675,7 @@ test("runtime delegate updates through the stable loader and keeps payloads on s
     return child;
   };
 
-  const delegate = await startHostRuntimeMcpDelegate({
+  const delegateOptions = {
     environment: {
       TRELIO_PLUGIN_ROOT: "/trusted/plugin",
       TRELIO_PLUGIN_VERSION: "3.0.2",
@@ -1612,7 +1695,8 @@ test("runtime delegate updates through the stable loader and keeps payloads on s
       isFile: () => true,
       isSymbolicLink: () => false,
     }),
-  });
+  };
+  const delegate = await startHostRuntimeMcpDelegate(delegateOptions);
   assert.equal(delegate.runtimeVersion, "3.0.4");
 
   const protectedCall = {
@@ -1639,6 +1723,22 @@ test("runtime delegate updates through the stable loader and keeps payloads on s
   assert.equal(forwardedFrames[1].method, "notifications/initialized");
   assert.deepEqual(forwardedFrames[2], protectedCall);
   assert.ok(delegateProcess);
+
+  invocations.length = 0;
+  const existingInitializeResult = {
+    protocolVersion: "2025-06-18",
+    serverInfo: { name: "trelio-remote-skills", version: "3.0.3" },
+  };
+  const installed = await startHostRuntimeMcpDelegate({ ...delegateOptions, existingInitializeResult });
+  assert.equal(installed.runtimeVersion, "3.0.4");
+  await installed.close();
+  assert.deepEqual(invocations.map(({ argumentsList }) => argumentsList), [
+    ["/trusted/plugin/scripts/trelio-host-runtime-loader.mjs", "mcp"],
+  ]);
+  await assert.rejects(startHostRuntimeMcpDelegate({
+    ...delegateOptions,
+    existingInitializeResult: { ...existingInitializeResult, capabilities: { tools: {} } },
+  }), /нового согласования возможностей/u);
 });
 
 test("runtime delegate rejects a loader that keeps the same immutable version", async () => {

@@ -47,7 +47,7 @@ export const createLocalSearchSelections = ({ now = Date.now, maximumEntries = 2
     const { selectedResultRef: _ref, ...parameters } = p;
     return { ...input, parameters: { ...parameters, arguments: { ...entry.arguments, ...extras } } };
   };
-  return { add, resolve };
+  return { add, resolve, hasRetainedSelections: () => { prune(); return entries.size > 0; } };
 };
 
 export const localSearchSelections = createLocalSearchSelections();

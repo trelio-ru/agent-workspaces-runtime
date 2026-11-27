@@ -693,6 +693,12 @@ publication tooling также остаются вне этого публичн
   credentials и proof через этот путь не передаются.
   Только подтверждённый missing shell требует restart; ACL, I/O и update failure
   сохраняются отдельно. Никакого второго verifier, cache scan или blind replay.
+  Native Codex MCP может принять уже установленную новую версию на
+  существующем stdio после idle и совместимого initialize. Учитывай
+  незавершённые запросы и локальные продолжения за пределами ответа.
+  Читай pointer ограниченным read-only чтением без ACL repair. Это только
+  сигнал для exact loader. Не отправляй туда рабочие
+  вызовы или уведомления клиента до принятия дочернего MCP.
 - Server-returned paths и commands трактуются буквально. Runtime не сканирует
   plugin cache и не выбирает похожую установленную версию.
 - CLI main-module guard сравнивает realpath exact файлов: Node раскрывает

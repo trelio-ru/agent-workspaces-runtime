@@ -11725,6 +11725,7 @@ export const createWorkspaceRunHeartbeatManager = ({
       if (entry) stopEntry(entry);
     },
     inspect: (workspaceDirectory) => entries.get(entryKey(workspaceDirectory)) ?? null,
+    hasManagedRuns: () => entries.size > 0,
   };
 };
 
@@ -11736,6 +11737,14 @@ const workspaceRunHeartbeatManager = createWorkspaceRunHeartbeatManager({
 const workspaceFinishOperations = createWorkspaceFinishOperations({
   errorFactory: (code, message, details) => new TrelioLocalContextError(code, message, details),
 });
+
+// These handles and heartbeat owners belong to this process, even after an
+// MCP response. A new runtime must not steal a poll or abandon an open writer.
+export const hasLocalWorkspaceContinuations = () => Boolean(
+  humanCompanySearches?.hasRetainedOperation()
+  || workspaceFinishOperations.hasRetainedOperations()
+  || workspaceRunHeartbeatManager.hasManagedRuns()
+);
 
 export const handleTrelioWorkspaceActionOperation = async (origin, rawInput, options = {}) => {
   const invocation = buildTrelioWorkspaceActionInvocation(rawInput, { managedBrowserFill: options.managedBrowserFill });

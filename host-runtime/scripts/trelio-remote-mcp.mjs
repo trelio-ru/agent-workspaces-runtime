@@ -14,7 +14,7 @@ import { withBrowserAccountState, skillResourcePolicy } from "./trelio-browser-s
  * bytes stay in a private local file and are sent only to the exact validated
  * HTTPS endpoint. Remote content is always returned as untrusted tool data.
  */
-import { CODEX_CONNECTION_ACTION, CODEX_CONNECTION_PRESENTATION, CODEX_CONNECTION_RESOURCE, CodexConnectionExpiredError, codexConnectionAppResource, openCodexConnectionWizard, checkCodexConnectionPresentation, handleCodexConnectionAction, normalizeCodexNavigationThreadId, createDeepseekDesktopNavigation, isDeepseekDesktopHost, confirmDesktopBrowser, confirmManualCodexBrowser } from "./trelio-codex-conversation.mjs";
+import { CODEX_CONNECTION_ACTION, CODEX_CONNECTION_PRESENTATION, CODEX_CONNECTION_RESOURCE, CodexConnectionExpiredError, codexConnectionAppResource, openCodexConnectionWizard, checkCodexConnectionPresentation, handleCodexConnectionAction, normalizeCodexNavigationThreadId, hasLiveCodexConnectionWizard, createDeepseekDesktopNavigation, isDeepseekDesktopHost, confirmDesktopBrowser, confirmManualCodexBrowser } from "./trelio-codex-conversation.mjs";
 import crypto from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
 import { cleanNativeRuntimeToolArguments, prepareCodexMcpToolArguments, prepareNativeRuntimeToolArguments } from "./trelio-runtime-session.mjs";
@@ -28,7 +28,7 @@ import { LOCAL_PROPOSAL_FILES } from "./trelio-proposal-local-files.mjs";
 import { visualMcpResult } from './trelio-visual-result.mjs';
 import {
   HOST_RUNTIME_UPGRADE_REQUIRED_CODES, HostRuntimeRecoveryError,
-  prepareHostRuntimeUpgrade, classifyHostRuntimeRecoveryFailure,
+  prepareHostRuntimeUpgrade, resolveHostRuntimeLoader, classifyHostRuntimeRecoveryFailure,
 } from "./trelio-host-runtime-recovery.mjs";
 import { readDiagnosticDetail } from "./trelio-diagnostic-observation.mjs";
 import { createAgentDiagnosticReporter } from "./trelio-agent-diagnostics.mjs";
@@ -88,6 +88,7 @@ import {
   loadToken,
   openBrowser,
   parseAndValidateAgentSkillPackage,
+  readBoundedLocalTextFile,
   readPrivateJsonFile,
   startHumanCodexPluginPreservation,
   request,
@@ -138,6 +139,7 @@ import {
   handleTrelioLocalContextOperation,
   completeHumanCompanySearch,
   closeHumanCompanySearches,
+  hasLocalWorkspaceContinuations,
   isHumanCompanySearch,
   isHumanCompanySearchPoll,
   handleTrelioLocalActionOperation,
@@ -195,6 +197,8 @@ const nativeTrelioToolBudget = name => {
 const HOST_RUNTIME_UPDATE_TIMEOUT_MS = 180_000;
 const HOST_RUNTIME_MCP_INITIALIZE_TIMEOUT_MS = 10_000;
 const HOST_RUNTIME_MCP_CLOSE_TIMEOUT_MS = 5_000;
+const HOST_RUNTIME_MCP_IDLE_CHECK_MS = 30_000;
+const HOST_RUNTIME_MCP_IDLE_RETRY_MS = 5 * 60_000;
 
 const CREDENTIAL_SETUP_TIMEOUT_MS = 10 * 60 * 1000;
 const CREDENTIAL_BROWSER_HANDOFF_TIMEOUT_MS = 7_500;
@@ -6698,10 +6702,10 @@ export const isHostRuntimeUpgradeRequiredError = (error) => (
  * stdio transport.
  *
  * The stable plugin loader is the only component allowed to select and verify
- * a downloaded runtime. The old runtime therefore starts that loader twice:
- * once for an exact signed update and once for a fresh MCP process. Tool
- * arguments, runtime proofs and protected results travel only through anonymous
- * stdio pipes; none of them enter argv, environment, temporary files or logs.
+ * a downloaded runtime. Recovery runs the exact updater before starting a
+ * fresh MCP. An idle refresh can use a package already installed by the
+ * same loader. Tool arguments, runtime proofs and protected results travel
+ * only through anonymous stdio pipes and stay out of argv, env, files and logs.
  */
 export const startHostRuntimeMcpDelegate = async ({
   environment = process.env,
@@ -6715,6 +6719,7 @@ export const startHostRuntimeMcpDelegate = async ({
   updateTimeoutMs = HOST_RUNTIME_UPDATE_TIMEOUT_MS,
   initializeTimeoutMs = HOST_RUNTIME_MCP_INITIALIZE_TIMEOUT_MS,
   closeTimeoutMs = HOST_RUNTIME_MCP_CLOSE_TIMEOUT_MS,
+  existingInitializeResult,
 } = {}) => {
   if (!initializeParams || typeof initializeParams !== "object") {
     throw new Error(
@@ -6724,18 +6729,18 @@ export const startHostRuntimeMcpDelegate = async ({
   if (typeof enqueueResponse !== "function") {
     throw new Error("Trelio host runtime handoff требует внешний MCP transport.");
   }
-  const loaderPath = await prepareHostRuntimeUpgrade({
-    environment, statFile, accessFile, spawnProcess, timeoutMs: updateTimeoutMs,
-  });
+  const loaderOptions = { environment, statFile, accessFile, spawnProcess, timeoutMs: updateTimeoutMs };
+  const loaderPath = existingInitializeResult
+    ? await resolveHostRuntimeLoader(loaderOptions)
+    : await prepareHostRuntimeUpgrade(loaderOptions);
 
   let child;
   try {
     child = spawnProcess(process.execPath, [loaderPath, "mcp", ...runtimeArguments], {
       env: {
         ...environment,
-        // The explicit __update immediately above already performed the bounded
-        // network convergence. Avoid a second startup fetch while retaining the
-        // delegate's own ability to perform a later exact hard-gate handoff.
+        // Select and verify the installed package with the same exact loader.
+        // Recovery has already run the updater when a fresh fetch was required.
         TRELIO_HOST_RUNTIME_DISABLE_AUTO_UPDATE: "1",
       },
       shell: false,
@@ -6925,11 +6930,29 @@ export const startHostRuntimeMcpDelegate = async ({
       + `${currentRuntimeVersion} -> ${nextRuntimeVersion || "unknown"}.`,
     );
   }
+  if (existingInitializeResult && (
+    nestedInitialize.protocolVersion !== existingInitializeResult.protocolVersion
+    || nestedInitialize.serverInfo.name !== existingInitializeResult.serverInfo.name
+    || !isDeepStrictEqual(nestedInitialize.capabilities, existingInitializeResult.capabilities)
+  )) {
+    closing = true;
+    childOutput.close();
+    child.kill?.();
+    throw new Error("Обновлённый Trelio MCP требует нового согласования возможностей.");
+  }
   ready = true;
-  await writeFrame({ jsonrpc: "2.0", method: "notifications/initialized" });
+  try {
+    await writeFrame({ jsonrpc: "2.0", method: "notifications/initialized" });
+  } catch (error) {
+    closing = true;
+    childOutput.close();
+    child.kill?.();
+    throw error;
+  }
 
   return {
     runtimeVersion: nextRuntimeVersion,
+    isReady: () => !closing && !terminalError,
     forward: async (message) => {
       let forwardedMessage = message;
       if (
@@ -7300,6 +7323,26 @@ export const handleLocalMcpMessage = async (
   };
 };
 
+// The pointer is a refresh hint only. Both profiles use the shell's shared
+// cache and still let the exact loader choose and verify the executable.
+const readInstalledRuntimeVersion = async (environment) => {
+  const configDirectory = resolveWorkspaceBridgeConfigDirectory({
+    environment: { ...environment, TRELIO_WORKSPACE_CLIENT_PROFILE: "" },
+  });
+  // This version check runs while idle, including on Windows. It must not
+  // start an ACL worker or write to the cache that the loader is publishing.
+  const pointerText = await readBoundedLocalTextFile(path.join(configDirectory, "host-runtimes", "current.json"), 4096);
+  const pointer = JSON.parse(pointerText);
+  return SHA256_PATTERN.test(pointer?.packageSha256) ? pointer.runtimeVersion : null;
+};
+
+const hasLocalMcpContinuations = () => hasLocalWorkspaceContinuations()
+  || hasLiveCodexConnectionWizard()
+  || localSearchSelections.hasRetainedSelections()
+  // Older proposal cards can still use the transport's private route table.
+  // Preserve their existing validity without copying or guessing routes.
+  || localProposalRouteById.size > 0;
+
 export const runStdioHost = async ({
   inputStream = process.stdin,
   outputStream = process.stdout,
@@ -7310,6 +7353,7 @@ export const runStdioHost = async ({
   legacyMcpMigration = removeCodexLegacyTrelioMcpRegistration,
   migrateClientConfiguration = migrateCodexLegacyTrelioMcpForRuntime,
   startRuntimeDelegate = startHostRuntimeMcpDelegate,
+  readInstalledVersion = readInstalledRuntimeVersion,
   runtimeArguments = [],
   codexMcpRuntime = false,
   spawnProcess = spawn,
@@ -7337,6 +7381,16 @@ export const runStdioHost = async ({
   const inFlightDispatches = new Set();
   let clientCapabilities = null;
   let clientInitializeParams = null;
+  let existingInitializeResult = null;
+  let clientInitialized = false;
+  let installedRuntimeRefresh = null;
+  let failedInstalledVersion = null;
+  let retryInstalledVersionAt = 0;
+  const currentRuntimeVersion = getHostRuntimeVersion(environment);
+  const canRefreshInstalledRuntime = codexMcpRuntime
+    && path.isAbsolute(environment.TRELIO_PLUGIN_ROOT || "")
+    && STABLE_VERSION_PATTERN.test(currentRuntimeVersion);
+  let runtimeRefreshTimer;
   let clientRequestSequence = 0;
   let outputQueue = Promise.resolve();
   let runtimeDelegate = null;
@@ -7354,7 +7408,10 @@ export const runStdioHost = async ({
     outputQueue = outputQueue.then(() => {
       outputStream.write(`${JSON.stringify(response)}\n`);
       // Only the write boundary is known here, not receipt by the MCP client.
-      if (isInitialize) startupTrace("initialize_response");
+      if (isInitialize) {
+        existingInitializeResult = response.result ?? null;
+        startupTrace("initialize_response");
+      }
       if (isInitialize && response.result && !pluginPreservation && !transportClosed) {
         // The cache belongs to the shell even when execution has moved to a
         // signed runtime. Keep the original hook/skill paths alive, but never
@@ -7374,9 +7431,10 @@ export const runStdioHost = async ({
         enqueueResponse,
         spawnProcess,
         statFile,
-        currentRuntimeVersion: getHostRuntimeVersion(environment),
+        currentRuntimeVersion,
       }).then((delegate) => {
         runtimeDelegate = delegate;
+        clearInterval(runtimeRefreshTimer);
         return delegate;
       }).catch((error) => {
         // A transport or update failure does not prove that the signed rollout
@@ -7457,7 +7515,63 @@ export const runStdioHost = async ({
     });
   };
 
+  const isIdleForRefresh = () => !transportClosed && clientInitialized
+    && existingInitializeResult && !runtimeDelegatePromise
+    && !inFlightDispatches.size && !pendingClientRequests.size
+    && !handleMessage.hasPendingOAuth?.()
+    && (runtimeArguments[1] !== "local" || !hasLocalMcpContinuations());
+
+  const refreshInstalledRuntime = () => {
+    if (installedRuntimeRefresh || !isIdleForRefresh()) return;
+    installedRuntimeRefresh = (async () => {
+      const version = await readInstalledVersion(environment);
+      if (!STABLE_VERSION_PATTERN.test(version)
+        || (version === failedInstalledVersion && Date.now() < retryInstalledVersionAt)
+        || compareStableVersions(version, currentRuntimeVersion) <= 0 || !isIdleForRefresh()) return;
+      let delegate;
+      let attached = false;
+      try {
+        delegate = await startRuntimeDelegate({
+          environment, initializeParams: clientInitializeParams, existingInitializeResult,
+          runtimeArguments, spawnProcess, statFile, currentRuntimeVersion,
+          // The client still talks to the original process during startup.
+          // Announce the replacement only after it actually owns the transport.
+          enqueueResponse: frame => attached ? enqueueResponse(frame) : undefined,
+        });
+      } catch {
+        // No request entered the replacement. Keep serving with the old
+        // implementation. Back off local launch failures without blocking a
+        // later exact compatibility gate or a different installed version.
+        failedInstalledVersion = version;
+        retryInstalledVersionAt = Date.now() + HOST_RUNTIME_MCP_IDLE_RETRY_MS;
+        return;
+      }
+      // New calls continued normally during startup. A call may have opened
+      // a process-bound continuation or started exact hard-gate recovery.
+      if (!isIdleForRefresh() || !delegate.isReady()) {
+        await delegate.close();
+        return;
+      }
+      attached = true;
+      runtimeDelegate = delegate;
+      runtimeDelegatePromise = Promise.resolve(delegate);
+      clearInterval(runtimeRefreshTimer);
+      if (existingInitializeResult.capabilities?.tools?.listChanged) {
+        await enqueueResponse({ jsonrpc: "2.0", method: "notifications/tools/list_changed" });
+      }
+    })().catch(() => {}).finally(() => { installedRuntimeRefresh = null; });
+  };
+
   const dispatch = async (message) => {
+    if (message?.jsonrpc === "2.0" && message.method === "notifications/initialized") {
+      clientInitialized = true;
+      if (canRefreshInstalledRuntime && !runtimeRefreshTimer) {
+        // A quiet client may have no incoming frames between releases. Observe
+        // the installed pointer in the background without polling the server.
+        runtimeRefreshTimer = setInterval(refreshInstalledRuntime, HOST_RUNTIME_MCP_IDLE_CHECK_MS);
+        runtimeRefreshTimer.unref();
+      }
+    }
     if (
       message?.jsonrpc === "2.0"
       && message.method === undefined
@@ -7558,9 +7672,15 @@ export const runStdioHost = async ({
     }
   };
 
-  const startDispatch = (promise) => {
+  const startDispatch = (message) => {
+    const promise = dispatch(message);
     inFlightDispatches.add(promise);
-    promise.finally(() => inFlightDispatches.delete(promise)).catch(() => {});
+    promise.finally(() => {
+      inFlightDispatches.delete(promise);
+      // Never put cache reads, package verification or child initialize on
+      // the business call's critical path. Only idle transports can switch.
+      if (canRefreshInstalledRuntime) refreshInstalledRuntime();
+    }).catch(() => {});
   };
 
   for await (const line of input) {
@@ -7580,12 +7700,13 @@ export const runStdioHost = async ({
     }
     // Do not await here. In particular, a cancellation notification must be
     // read while the corresponding tools/call is waiting for a human form.
-    startDispatch(dispatch(message));
+    startDispatch(message);
   }
 
   // EOF means the MCP transport disappeared. Abort every active operation so
   // loopback listeners, sockets and opener children cannot outlive the host.
   transportClosed = true;
+  clearInterval(runtimeRefreshTimer);
   const closingSearches = closeHumanCompanySearches();
   const closingPluginPreservation = pluginPreservation?.close();
   for (const controller of activeToolCalls.values()) {
@@ -7605,6 +7726,7 @@ export const runStdioHost = async ({
   if (runtimeDelegatePromise) {
     await runtimeDelegatePromise.catch(() => null);
   }
+  await installedRuntimeRefresh;
   await runtimeDelegate?.close();
   await outputQueue;
   diagnosticReporter.close();
@@ -8023,6 +8145,7 @@ export const { observeHarnessRuntime, harnessToolName, projectHarnessMcpResult,
     };
     return {
       initialize, close,
+      hasPendingOAuth: () => attempt !== null,
       async connect(signal, reauthorize = false) {
         throwIfAborted(signal);
         if (closed) throw new RemoteMcpOAuthError("REMOTE_MCP_OAUTH_CANCELLED", "Подключение закрыто вместе с клиентом.");
@@ -9318,6 +9441,7 @@ export const createDesktopOAuthMcpHandler = (nativeClient, {
     }
   };
   handler.close = () => connection?.close?.();
+  handler.hasPendingOAuth = () => connection?.hasPendingOAuth?.();
   return handler;
 };
 

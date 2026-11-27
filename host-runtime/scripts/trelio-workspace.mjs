@@ -13606,7 +13606,7 @@ const withWorkspaceOpenLock = async (workspaceId, handler, kind = "open") => {
   }
 };
 
-const readBoundedLocalTextFile = async (filePath, maximumBytes) => {
+export const readBoundedLocalTextFile = async (filePath, maximumBytes) => {
   let fileStat;
 
   try {
@@ -13616,9 +13616,8 @@ const readBoundedLocalTextFile = async (filePath, maximumBytes) => {
     throw error;
   }
 
-  // Both the working-folder binding and the Run locator are inputs to local
-  // path selection. Read ordinary files only, without calling the credential
-  // reader that may repair ACLs on Windows as part of opening a private file.
+  // Read a bounded local hint without credential-file ACL repair on Windows.
+  // Its caller still verifies whatever Run, package or other object it selects.
   if (
     !fileStat.isFile()
     || fileStat.isSymbolicLink()
