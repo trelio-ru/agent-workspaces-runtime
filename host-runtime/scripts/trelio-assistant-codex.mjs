@@ -1583,6 +1583,17 @@ export const assistantInterruptedTechnicalPrelude=(...args)=>
 
 const draftReads=new Set(['get_task','get_task_sections','get_task_instruction_page','get_assistant_owner_question','get_trelio_tool_contract']);
 
+// The signed browser's state is in its caption when Codex needs both text
+// and PNG. Retain the older native structured status for historical turns.
+const nativeBrowserVisitResult=value=>{
+  const {structuredContent,content}=value??{};
+  if(plainRecord(structuredContent)&&Object.hasOwn(structuredContent,'state'))return structuredContent;
+  if(!Array.isArray(content)||content[0]?.type!=='text'||typeof content[0].text!=='string'
+    ||Buffer.byteLength(content[0].text)>32_768||content.length>2||content.length===2&&content[1]?.type!=='image')return null;
+  try{const result=JSON.parse(content[0].text);return plainRecord(result)&&!Object.hasOwn(result,'code')?result:null;}
+  catch{return null;}
+};
+
 // Both historical recovery paths verify the same passive browser lifecycle.
 // The origin is an opaque binding established by the original host call. No
 // provider name changes the result, and a closed visit never attests an input
@@ -1724,14 +1735,14 @@ const assistantInterruptedWorkspaceFinish=(turn,deliveryId,taskPass,allowPending
     if(['agentMessage','reasoning','sleep'].includes(item?.type))continue;
     if(item?.type!=='mcpToolCall'||item.server!=='trelio-assistant'||!item.arguments||Object.getPrototypeOf(item.arguments)!==Object.prototype)return null;
     const args=item.arguments;
-    let result=item.result?.structuredContent;
+    const browserRead=canPollOpen&&item.tool==='use_assistant_browser';
+    let result=browserRead?nativeBrowserVisitResult(item.result):item.result?.structuredContent;
     // Codex may persist a native task read as one JSON text block. This
     // compatibility is for known reads only; no prose or JSON-in-text can
     // stand in for a mutation, Run preparation, or finish receipt.
     const content=item.result?.content;
-    const browserRead=canPollOpen&&item.tool==='use_assistant_browser';
-    if((draftReads.has(item.tool)||browserRead||item.tool==='get_assistant_status')&&result==null&&Array.isArray(content)
-      &&(content.length===1||browserRead&&content.length===2&&content[1]?.type==='image')
+    if((draftReads.has(item.tool)||item.tool==='get_assistant_status')&&result==null&&Array.isArray(content)
+      &&content.length===1
       &&content[0]?.type==='text'&&typeof content[0].text==='string'&&Buffer.byteLength(content[0].text)<=512*1024){
       try{
         const parsed=JSON.parse(content[0].text);
@@ -2961,7 +2972,7 @@ export const inspectAssistantRecoveredOutcome=({original,save},{deliveryId,origi
     }
     if(!exactDraftPass(args.taskPass,taskPass))return null;
     if(item.tool==='use_assistant_browser'){
-      if(!success||finishStarted||!observeClosedBrowserVisit(browserVisit,args,result))return null;
+      if(!success||finishStarted||!observeClosedBrowserVisit(browserVisit,args,nativeBrowserVisitResult(item.result)))return null;
       continue;
     }
     if(item.tool==='continue_assistant_workspace_action'&&args.schemaVersion===1&&args.operation==='skill_run'){

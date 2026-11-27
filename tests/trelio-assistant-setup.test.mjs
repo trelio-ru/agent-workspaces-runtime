@@ -514,6 +514,20 @@ test('request transport preserves closed failure boundaries through real native 
         siteOrigin:request.arguments.siteOrigin,observedOrigin:'https://login.example.test'});
       assert.equal(picture.content[1].mimeType,'image/png');
     }
+    // Verify the model-facing facade after the real child/PNG validation.
+    // Codex's conversion gives a non-null structured result precedence.
+    await fs.mkdir(path.join(root,'digital-assistants'));
+    await fs.writeFile(path.join(root,'digital-assistants','identity.json'),'{}');
+    const facade=await createForwardingAssistantMcp({configurationDirectory:root,createWorkspace:async()=>({}),
+      request:async raw=>invoke(source+observed+write,{request:raw})});
+    const visible=await facade.callTool(request.name,request.arguments);
+    assert.equal(Object.hasOwn(visible,'structuredContent'),false);
+    const caption=JSON.parse(visible.content[0].text);
+    assert.equal(caption.state,'ready');
+    assert.deepEqual(caption.browserObservation,{sessionId:caption.sessionId,frameId:caption.frameId,
+      siteOrigin:request.arguments.siteOrigin,observedOrigin:'https://login.example.test'});
+    assert.equal(visible.content[1].mimeType,'image/png');
+    assert.ok(visible.content[1].data.length>768*1024);
     for(const edit of ["observation.frameId=randomUUID()", "observation.sessionId=randomUUID()",
       "observation.siteOrigin='https://other.test'", "observation.observedOrigin='https://login.example.test/path?private'",
       "observation.observedOrigin='http://login.example.test'", "observation.observedOrigin='https://name:pw@login.example.test'",
@@ -1208,7 +1222,7 @@ test('a slow own-Run opening survives a short caller wait, with one child and fr
   assert.equal(launches,1);
 });
 
-test('stdio closes native skill admission before its one isolated child and keeps the two clocks independent',async t=>{
+for(const operation of ['skill_run','inspect'])test(`stdio closes native ${operation} admission before its one isolated child`,async t=>{
   const {runtimeHookSignal}=await import('../host-runtime/scripts/trelio-hook-private-session.mjs');
   const {runWorkspaceFinishProcess}=await import('../host-runtime/scripts/trelio-workspace-finish-progress.mjs');
   const {runAssistantWorkspaceProcess}=await import('../host-runtime/scripts/trelio-assistant-entry.mjs');
@@ -1217,8 +1231,15 @@ test('stdio closes native skill admission before its one isolated child and keep
   await fs.mkdir(path.join(root,'digital-assistants'),{recursive:true});
   await fs.writeFile(path.join(root,'digital-assistants','identity.json'),'{}');
   const plan=workspacePlan();
-  plan.localAction={schemaVersion:1,operation:'skill_run',parameters:{companyId:plan.scope.companyId,
-    skillId:'signed-fixture',releaseId:randomUUID(),runtimeSessionId:randomUUID(),arguments:['inspect']}};
+  if(operation==='inspect'){
+    const workspaceId=plan.localAction.parameters.workspaceId;
+    plan.localAction={schemaVersion:1,operation,parameters:{workspaceId}};
+    plan.encryptedInspection={schemaVersion:1,workspaceId,companyId:plan.scope.companyId,
+      companySlug:'fixture',requestOrigin:'https://trelio.ru'};
+  }else{
+    plan.localAction={schemaVersion:1,operation,parameters:{companyId:plan.scope.companyId,
+      skillId:'signed-fixture',releaseId:randomUUID(),runtimeSessionId:randomUUID(),arguments:['inspect']}};
+  }
 
   // Advance only the actual facade admission clock. The child really runs
   // through the production process reader and emits its complete pipe frame.
@@ -1238,10 +1259,10 @@ test('stdio closes native skill admission before its one isolated child and keep
         assert.deepEqual(JSON.parse(processOptions.input),plan);
         const command=`let data='';for await(const chunk of process.stdin)data+=chunk;
           const action=JSON.parse(data).localAction;
-          process.stdout.write(JSON.stringify({schemaVersion:1,operation:action.operation,stdout:action.parameters.arguments[0]}));`;
+          process.stdout.write(JSON.stringify({schemaVersion:1,operation:action.operation,stdout:action.parameters.arguments?.[0]??'inspect'}));`;
         const pending=runWorkspaceFinishProcess(executable,['--input-type=module','-e',command],processOptions);
         admissions[0].abort(new Error('short admission lifetime elapsed'));
-        assert.equal(processOptions.signal.aborted,false,'admission expiry cannot terminate an admitted provider');
+        assert.equal(processOptions.signal.aborted,false,'admission expiry cannot terminate an admitted child');
         return pending;
       }})});
   const input=Readable.from([

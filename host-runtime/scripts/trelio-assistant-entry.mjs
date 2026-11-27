@@ -1442,7 +1442,7 @@ export const createProductionAssistantMcp = async ({presentationProfile='task',p
 // current signed implementation for each invocation without reconnecting Codex.
 // Internal only. Nothing coming off the native pipe, or from the model, can
 // select the execution phase. It exists only for a validated task skill plan.
-const admittedTaskSkill = Symbol('admittedTaskSkill');
+const admittedWorkspaceExecution = Symbol('admittedWorkspaceExecution');
 // The signed provider still owns its original 180-second limit. One ordinary
 // HTTP budget covers the rest of the isolated invocation (local/native setup,
 // result projection and cleanup), under this single non-sliding outer bound.
@@ -1456,13 +1456,24 @@ export const createForwardingAssistantMcp = async ({presentationProfile='task',r
   catch(error){if(error.code==='ENOENT')return null;throw error;}
   const workspace = await createWorkspace();
   return {listTools:signal=>request({operation:'list',...(['remote_mcp','skill_setup','company_context'].includes(presentationProfile)?{presentationProfile}:{})},{signal}),
-    async callTool(name,args,signal,{separateTaskSkillExecution=false}={}) {
+    async callTool(name,args,signal,{separateWorkspaceExecution=false}={}) {
       // The deferred read retains this invocation beyond its first await.
       // Preserve exactly the parsed original, never a mutable caller object.
       args=JSON.parse(JSON.stringify(args));
       const result=await request({operation:'call',name,arguments:args,
         ...(['search','fetch'].includes(name)?{prepareCompanySearch:2}:{}),
         ...(['remote_mcp','skill_setup','company_context'].includes(presentationProfile)?{presentationProfile}:{})},{signal});
+      if(name==='use_assistant_browser'&&!result?.isError&&result?.structuredContent?.browserObservation
+        &&result.content?.[1]?.type==='image'){
+        // Codex converts structuredContent to text and drops all MCP image
+        // blocks. Keep both the validated PNG and its observed login origin
+        // in content. The signed worker and protected fill checks stay as-is.
+        const {structuredContent,content,...envelope}=result;
+        const [frame,image]=content;
+        return {...envelope,content:[{type:'text',text:JSON.stringify({
+          ...JSON.parse(frame.text),browserObservation:structuredContent.browserObservation,
+        })},image]};
+      }
       const preparation=result?._meta?.['trelio/assistant-company-read'];
       if(preparation!==undefined){
         if(result.isError||!(name==='search'&&[1,2].includes(preparation?.schemaVersion)
@@ -1531,14 +1542,14 @@ export const createForwardingAssistantMcp = async ({presentationProfile='task',r
           :executed?.operation==='skill_run'&&executed.instruction?executed.instruction
           :'Assistant Workspace action completed or remains in progress; inspect structuredContent.'}],structuredContent:executed};
       };
-      if(separateTaskSkillExecution && args?.operation==='skill_run'){
+      if(separateWorkspaceExecution&&(args.operation==='skill_run'||args.operation==='inspect'&&result.structuredContent?.encryptedInspection)){
         const plan=await validateAssistantWorkspacePlan(result.structuredContent);
-        if(plan.localAction.operation!=='skill_run')fail('ASSISTANT_WORKSPACE_PLAN_INVALID');
+        if(plan.localAction.operation!==args.operation)fail('ASSISTANT_WORKSPACE_PLAN_INVALID');
         signal?.throwIfAborted();
-        // Retain the validated action and executor only. Native admission has
-        // spent the original proof. The signed child reads its own fresh live
-        // identity/lease and cannot borrow this short private process session.
-        return {[admittedTaskSkill]:executionSignal=>executeWorkspace(assistantWorkspaceExecutionPlan(plan),executionSignal)};
+        // The exact accepted archive can take longer to download/decrypt than
+        // to authorize. Reuse the bounded signed-child lifetime after native
+        // admission, just as for a skill. The child repeats the live checks.
+        return {[admittedWorkspaceExecution]:executionSignal=>executeWorkspace(assistantWorkspaceExecutionPlan(plan),executionSignal)};
       }
       return executeWorkspace(result.structuredContent,signal);
     }};
@@ -1651,13 +1662,13 @@ export const runAssistantSetupMcp = async ({ input = process.stdin, output = pro
           const callProfile=assistantMcpCallProfile(presentationProfile,message.params.name,message.params.arguments);
           const admitted=await withProxy((proxy, signal) => {
             if (!proxy) throw Object.assign(new Error(), { code: 'ASSISTANT_HOST_NOT_CONFIGURED' });
-            return proxy.callTool(message.params.name, message.params.arguments, signal,{separateTaskSkillExecution:true});
+            return proxy.callTool(message.params.name, message.params.arguments, signal,{separateWorkspaceExecution:true});
           },{interactiveSourceSetup:interactiveAssistantTool(message.params.name),callProfile});
           // The native request and its private process session are closed.
           // Execute once under the signed child lifetime; serial stdio keeps
           // the result in this same call without a new schema or replay path.
-          const result=typeof admitted?.[admittedTaskSkill]==='function'
-            ?await admitted[admittedTaskSkill](AbortSignal.any([controller.signal,AbortSignal.timeout(taskSkillExecutionTimeoutMs)]))
+          const result=typeof admitted?.[admittedWorkspaceExecution]==='function'
+            ?await admitted[admittedWorkspaceExecution](AbortSignal.any([controller.signal,AbortSignal.timeout(taskSkillExecutionTimeoutMs)]))
             :admitted;
           // Reflect the native view used by a successful call in discovery.
           // A refusal or malformed input does not replace the prior catalogue.
@@ -4950,7 +4961,7 @@ export const executeAssistantWorkspacePlan = async (raw,{withProfile=withProduct
       throw error;
     }
   },{signal:materialization,encryptedInspection:plan.encryptedInspection??null,
-    ...(plan.localAction.operation==='skill_run'?{taskSkillExecution:true}:{}),
+    ...(plan.localAction.operation==='skill_run'||plan.encryptedInspection?{taskSkillExecution:true}:{}),
     workspaceRun:['open','status','heartbeat','checkpoint','finish','pause'].includes(plan.localAction.operation)?plan.runIdentity:null,
     secretBrowserFill:plan.localAction.operation==='secret_browser_fill'
     ? {grantId:plan.localAction.parameters.grantId,...plan.runIdentity,

@@ -718,6 +718,16 @@ the SAME visual PNG/MCP validator. A working task's optional `browserObservation
 must match the PNG session/frame and requested site origin. Its observed HTTPS
 origin may differ after a redirect. Another MIME, arbitrary large JSON/prose,
 extra fields or malformed UTF-8 refuse. There is no disk/base64-to-text fallback.
+The local Codex MCP facade places that validated observation in the image
+caption with the same frame data. Codex gives structured content precedence
+over rich content, so an image result uses only MCP content blocks. The
+protected fill still verifies the exact live browser form and origin.
+
+An encrypted accepted Workspace inspection obtains the existing exact native
+read plan within the ordinary admission budget. Its signed child runs once
+under the same independent 240-second budget as an admitted skill, and
+rechecks its live pass and encryption recipient before reading. This gives
+cold archives time to materialize without extending admission or opening a Run.
 Owner intake exposes navigate/screenshot/scroll/status/close only. Working tasks
 also expose click/type-text/key; sensitive external actions keep independent
 owner decisions. No JavaScript/DOM/CDP, arbitrary paths or credential arguments.

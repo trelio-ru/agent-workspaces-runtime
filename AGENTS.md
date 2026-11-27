@@ -54,6 +54,11 @@ publication tooling также остаются вне этого публичн
   timer to be due. Keep both old deliveries in history.
   Check the native prefix through the checkpoint's exact original turn for
   the single newer inspection marker. Earlier history cannot certify this carry.
+  The Codex browser result carries the validated PNG and frame observation
+  in MCP content so the model can see both. The private worker still validates
+  the exact image, HTTPS origins and live protected input binding.
+  An admitted encrypted accepted read reuses the bounded skill worker lifetime.
+  Native admission keeps its own short clock and the child rechecks the scope.
   Source attention gates intake before models: email INBOX all new; Telegram/MAX
   private incoming or native mention/direct reply. Ordinary group history stays
   at provider; scheduled review uses accepted per-task WORK.md bookmarks, not

@@ -2107,6 +2107,16 @@ for(const mode of ['local_draft','portable_draft'])test(`a verified ${mode} save
     parent.items.splice(6,1);
     assert.deepEqual(await read([save,parent]),{state:'uncertain'});
   }
+  const rich=historyWithBrowser('https://school.example.test');
+  for(const item of rich.items.filter(item=>item.tool==='use_assistant_browser')){
+    const caption=item.result.structuredContent;
+    item.result={content:[{type:'text',text:JSON.stringify(caption)}]};
+    if(item.arguments.command.operation==='screenshot')
+      item.result.content.push({type:'image',mimeType:'image/png',data:'synthetic'});
+  }
+  assert.deepEqual(await read([save,rich]),{state:'recovered_outcome_observed',turnId:save.id,evidence});
+  rich.items[5].result.content[1].type='resource';
+  assert.deepEqual(await read([save,rich]),{state:'uncertain'});
   const reviewId=randomUUID(),cwd=await fs.realpath(process.cwd());
   const plan={saveReviewId:saveMarkerId,evidence,schedule:{
     priorReceiptId:randomUUID(),cadence:'daily',timeZone:'Europe/Moscow',dailyLocalTime:'20:00',
