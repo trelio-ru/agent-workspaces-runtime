@@ -613,7 +613,9 @@ test('standalone browser opens a real page, hands off manual input and isolates 
     await call('close', {}, owner, null).catch(() => {});
     for (let i = 0; i < 160; i++) {
       if (!await fs.stat(active).then(() => true, error => { if (error.code === 'ENOENT') return false; throw error; })) {
-        await fs.rm(directory, { recursive: true, force: true });
+        // The claim is gone, but Chromium may still be releasing file handles
+        // in this owned fixture directory. A persistent cleanup failure stays red.
+        await fs.rm(directory, { recursive: true, force: true, maxRetries: 10, retryDelay: 200 });
         return;
       }
       await new Promise(resolve => setTimeout(resolve, 100));

@@ -96,9 +96,9 @@ the expected SHA, including when the candidate is already integrated.
 - All four `Native visual browser (...)` jobs
 
 The real visual npm fixture waits for its copied Node worker to finish.
-Owned test-tree cleanup uses a bounded filesystem retry after that process
-settles. A transient Windows executable lock cannot hide runner results,
-and a persistent cleanup error still fails CI.
+The standalone browser fixture waits for its exact worker claim to disappear.
+Both allow a bounded filesystem retry to remove the owned test tree after
+shutdown. A persistent cleanup error fails CI.
 
 Both macOS matrices use the hosted `macos-15-intel` pool. All native checks,
 platform-specific security assertions and Windows artifacts are part of release

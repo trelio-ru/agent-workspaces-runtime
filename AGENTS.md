@@ -1982,8 +1982,9 @@ Exact legacy template bytes для распознавания при мигра�
   Maintainer Markdown проверяет полный Git diff без запуска runtime.
   Полный набор из `.github/workflows/runtime-tests.yml` выполняет release.
   Tag проверяет plan, SHA, run/attempt и все обязательные результаты.
-  Native visual npm fixture: wait for the child before bounded cleanup of
-  the owned test tree. Keep behavior and persistent cleanup failures strict.
+  Native visual fixtures: confirm child exit or removal of the exact worker
+  claim before bounded cleanup of the owned test tree. Persistent failures
+  fail the fixture.
   Short-wait Workspace open fixtures observe terminal state through the
   original operation handle. Every poll keeps fresh native admission.
 - The Linux native browser gate normalizes official main/Azure/EC2 mirrorlist
