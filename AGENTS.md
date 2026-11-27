@@ -705,6 +705,8 @@ publication tooling также остаются вне этого публичн
   `codex_mcp`. Старые и новые сессии имеют раздельный private state.
   Имена `trelio-runtime` и `trelio-runtime-local` находятся вне matcher
   старого `PreToolUse`. Не читать или менять hook trust ради перехода.
+  В этих MCP-ответах показывать фактический отказ допуска и сохранять reason.
+  Прежний код на сервере и в диагностических метриках совместим с hook-маршрутом.
 - Запуск новых чатов Codex в общем `trelio-codex-conversation.mjs` – [личная привязка папки](docs/agent-workspace-runtime.md#codex-new-chat); company задачи не определяет launch root. Без existing managed binding hook молчит: чтение задачи не запускает onboarding и не просит выбрать или привязать папку.
 - [Формат черновика запуска DeepSeek Harness](docs/agent-workspace-runtime.md#native-deepseek-harness-connection) согласован с запуском из карточки задачи в Codex и Claude Code.
 - Явный setup Codex использует [локальный мастер](docs/agent-workspace-runtime.md#codex-connection-wizard). Точный native thread/project read подставляет корень проекта. Без него мастер требует явный выбор проекта или папки. На macOS новая папка проходит системное открытие, нативное доверие и проверку в каталоге Codex до записи AGENTS/CLAUDE и регистрации. Хуки не нужны; название остаётся локальным.

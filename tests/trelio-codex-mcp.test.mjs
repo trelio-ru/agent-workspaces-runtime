@@ -935,6 +935,43 @@ test("bootstrap recovery keeps the hook-free Codex route when local tools are un
   assert.ok(report.clientRecoveryByKind.codex.verification.checks.includes("safe_read_in_target_thread"));
 });
 
+test("Codex preserves native admission reasons in both MCP error shapes", async () => {
+  const observed = [];
+  let calls = 0;
+  const handler = createCodexMcpHandler({
+    connect: () => ({
+      listTools: async () => [{ name: "get_workspace" }, { name: "get_task",
+        outputSchema: { type: "object", properties: { task: { type: "object" } }, required: ["task"] } }],
+      call: async name => {
+        calls++;
+        return name === "get_workspace"
+          ? { isError: true, structuredContent: { code: "TRELIO_RUNTIME_HOOK_REQUIRED",
+            reason: "invalid", message: "PRIVATE_FIXTURE" }, content: [] }
+          : { isError: true, content: [{ type: "text",
+            text: "TRELIO_RUNTIME_HOOK_REQUIRED (expired): PRIVATE_FIXTURE [expiredCause=runtime_session_expired]" }] };
+      },
+    }),
+    prepare: async ({ input }) => ({ ...input, runtimeSessionProof: "synthetic" }),
+  });
+  const options = { clientInfo, recordDiagnostic: (_name, _args, code) => observed.push(code) };
+  await handler(frame("initialize"), options);
+  for (const [name, reason] of [["get_workspace", "invalid"], ["get_task", "expired"]]) {
+    const { result } = await handler(frame("tools/call", { name }), options);
+    assert.equal(result.isError, true);
+    assert.doesNotMatch(JSON.stringify(result), /TRELIO_RUNTIME_HOOK_REQUIRED|PRIVATE_FIXTURE/u);
+    const diagnostic = JSON.parse(result.content[0].text);
+    assert.equal(diagnostic.code, "TRELIO_RUNTIME_ADMISSION_REJECTED");
+    assert.equal(diagnostic.reason, reason);
+    assert.equal(diagnostic.recovery.diagnosticSkill, "trelio-diagnostics");
+    if (reason === "expired") {
+      assert.equal(diagnostic.expiredCause, "runtime_session_expired");
+      assert.equal(result.structuredContent, undefined);
+    } else assert.deepEqual(result.structuredContent, diagnostic);
+  }
+  assert.deepEqual(observed, ["TRELIO_RUNTIME_HOOK_REQUIRED", "TRELIO_RUNTIME_HOOK_REQUIRED"]);
+  assert.equal(calls, 2);
+});
+
 test("an unpaired Codex call leaves the company decision to the backend and returns exact pairing on denial", async () => {
   const received = [];
   let enforcement = false;

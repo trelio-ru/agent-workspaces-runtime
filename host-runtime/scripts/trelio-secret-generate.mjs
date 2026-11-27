@@ -7,6 +7,7 @@
  * argv, a file, the local mirror, logs or the returned receipt.
  */
 import crypto from "node:crypto";
+import { projectRuntimeAdmissionFailure } from "./trelio-bridge-http-diagnostics.mjs";
 import { RuntimeProofPreparationError } from "./trelio-runtime-proof-preparation.mjs";
 
 import {
@@ -41,8 +42,8 @@ const INPUT_KEYS = new Set([
   "newSecret", "generatedFields", "userExplicitlyRequestedGeneratedPersistentStorage",
 ]);
 const SAFE_NATIVE_FAILURES = new Map([
-  ["TRELIO_RUNTIME_HOOK_REQUIRED", "Включите Hooks плагина Trelio Agent Workspaces и повторите запрос."],
-  ["AGENT_RUNTIME_POLICY_NOT_SATISFIED", "Выберите разрешённую компанией модель и уровень reasoning, затем начните новую сессию с включёнными Hooks."],
+  ["TRELIO_RUNTIME_HOOK_REQUIRED", "Trelio отклонил допуск рантайма. Проверьте текущий маршрут через trelio-diagnostics."],
+  ["AGENT_RUNTIME_POLICY_NOT_SATISFIED", "Проверьте допуск через trelio-diagnostics. При ограничении модели или уровня рассуждений выберите разрешённые настройки в текущем чате."],
   ["MCP_REAUTHORIZATION_REQUIRED", "Вызовите list_agent_secrets для исходной области через подключение Trelio: оно покажет штатное расширение OAuth-доступа. Сохраните ранее выданные scopes и повторите генерацию с тем же clientRequestId."],
 ]);
 
@@ -296,6 +297,9 @@ export const handleGeneratedAgentSecretSave = async (
       },
     )).json();
     const outcome = result.structuredContent;
+    // Only the native error category and its allowlisted reason can leave the secret adapter.
+    const admission = result.isError && projectRuntimeAdmissionFailure(outcome?.code, outcome);
+    if (admission) throw new RuntimeProofPreparationError(admission.reason, admission.expiredCause);
     if (result.isError && SAFE_NATIVE_FAILURES.has(outcome?.code)) {
       throw new AgentSecretGenerateError(outcome.code, SAFE_NATIVE_FAILURES.get(outcome.code));
     }

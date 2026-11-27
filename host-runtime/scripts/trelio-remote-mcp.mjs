@@ -23,7 +23,7 @@ import { withPrivateProcessSession, TRELIO_CALL_BUDGET_MS, TrelioCallTimeoutErro
 import { BROWSER_FILL_CALL_BUDGET_MS } from "./trelio-secret-browser-native.mjs";
 import { RuntimeProofPreparationError } from "./trelio-runtime-proof-preparation.mjs";
 import { ACCOUNT_CAPABILITY, ACCOUNT_MINIMUM_HOST_VERSION, appendSkillConnectionHints } from "./trelio-skill-accounts.mjs";
-import { bridgeHttpDiagnosticCode } from "./trelio-bridge-http-diagnostics.mjs";
+import { bridgeHttpDiagnosticCode, projectRuntimeAdmissionFailure } from "./trelio-bridge-http-diagnostics.mjs";
 import { LOCAL_PROPOSAL_FILES } from "./trelio-proposal-local-files.mjs";
 import { visualMcpResult } from './trelio-visual-result.mjs';
 import {
@@ -4590,6 +4590,41 @@ const LOCAL_TOOLS = [
 
 // Exact task delivery budgets use this same envelope before pagination.
 const buildTextResult = buildLocalTaskReadToolResult;
+const LEGACY_RUNTIME_ADMISSION_CODE = "TRELIO_RUNTIME_HOOK_REQUIRED";
+const CODEX_RUNTIME_ADMISSION_CODE = "TRELIO_RUNTIME_ADMISSION_REJECTED";
+
+// Relay only closed diagnostic fields. The backend wire code stays stable for
+// legacy clients, but a Codex request on the new route never needs hook advice.
+const codexRuntimeAdmissionPayload = (payload, missingObservation = false) => {
+  if (payload?.code !== LEGACY_RUNTIME_ADMISSION_CODE) return null;
+  const admission = projectRuntimeAdmissionFailure(payload.code, payload);
+  return {
+    code: missingObservation ? "TRELIO_RUNTIME_OBSERVATION_REQUIRED" : CODEX_RUNTIME_ADMISSION_CODE,
+    ...admission,
+    message: missingObservation
+      ? "Codex не передал наблюдение текущего хода. Проверьте текущий маршрут через trelio-diagnostics."
+      : "Trelio отклонил допуск рантайма. Проверьте текущий маршрут через trelio-diagnostics.",
+    protectedWorkBlocked: true,
+    recovery: { diagnosticSkill: "trelio-diagnostics" },
+  };
+};
+
+const runtimeAdmissionErrorPayload = (error, fallback) => error instanceof TrelioApiError
+  ? { ...projectRuntimeAdmissionFailure(error.code, error.payload), code: error.code }
+  : fallback;
+
+const codexLocalErrorPayload = (error, errorPayload) => {
+  const http = errorPayload.details?.http;
+  if (errorPayload.code === "TRELIO_WORKSPACE_ACTION_FAILED"
+    && errorPayload.details.failureCode === LEGACY_RUNTIME_ADMISSION_CODE
+    && http?.failureCode === LEGACY_RUNTIME_ADMISSION_CODE && http.runtime) {
+    // The Workspace error wrapper is unchanged. Its existing recovery data
+    // includes the exact expiry cause and the safe same-chat skill reload.
+    return { ...errorPayload, details: { ...errorPayload.details,
+      failureCode: CODEX_RUNTIME_ADMISSION_CODE, http: { ...http, failureCode: CODEX_RUNTIME_ADMISSION_CODE } } };
+  }
+  return codexRuntimeAdmissionPayload(runtimeAdmissionErrorPayload(error, errorPayload)) ?? errorPayload;
+};
 const buildWorkspaceActionResult = value => value?.operation === 'skill_run' && value.visual
   ? visualMcpResult(value.visual) : buildTextResult(value);
 
@@ -7179,11 +7214,20 @@ export const handleLocalMcpMessage = async (
       const value = await (ownsLifetime ? execute(signal)
         : withTrelioCallBudget(execute, { signal, ...budget }));
       if (delegated) return null;
-      const result = deliverLocalMcpResult(value, textCompatibility, message.params?.name === "continue_trelio_local_action"
-        ? message.params?.arguments?.parameters?.nativeTool ?? ""
-        : String(message.params?.name || ""));
-      // Only the MCP envelope boolean is read, never provider text/details.
-      try { recordDiagnostic?.(message.params?.name, message.params?.arguments, result?.isError === true ? "REMOTE_MCP_PROVIDER_ERROR" : "OK"); }
+      const localAction = message.params?.name === "continue_trelio_local_action";
+      const nativeTool = localAction ? message.params?.arguments?.parameters?.nativeTool ?? ""
+        : String(message.params?.name || "");
+      const secretAdmission = codexMcpRuntime && localAction && value?.isError === true
+        && ["save_known_agent_secret", "generate_agent_secret"].includes(nativeTool)
+        ? codexRuntimeAdmissionPayload(value.structuredContent) : null;
+      const result = deliverLocalMcpResult(secretAdmission
+        ? { ...buildTextResult(secretAdmission), structuredContent: secretAdmission, isError: true }
+        : value, textCompatibility, nativeTool);
+      // Provider errors remain opaque. Only the exact native secret adapter
+      // may report the compatible admission bucket.
+      try { recordDiagnostic?.(message.params?.name, message.params?.arguments,
+        secretAdmission ? LEGACY_RUNTIME_ADMISSION_CODE
+          : result?.isError === true ? "REMOTE_MCP_PROVIDER_ERROR" : "OK"); }
       catch { /* Keep original result. */ }
       return {
         jsonrpc: "2.0",
@@ -7237,7 +7281,7 @@ export const handleLocalMcpMessage = async (
                 structuredContent: errorPayload,
                 content: [{ type: "text", text: errorPayload.message }],
               }
-            : buildTextResult(errorPayload)),
+            : buildTextResult(codexMcpRuntime ? codexLocalErrorPayload(effectiveError, errorPayload) : errorPayload)),
           isError: true,
         },
       };
@@ -8899,9 +8943,20 @@ const codexInstructions = upstream => CODEX_RUNTIME_ROUTING_INSTRUCTIONS + CODEX
     .replace(/Trelio runtime policy is enforced by the approved Agent Workspaces client hook,.*?shell scripts\. /su, "")
     .replace(/MCP_REAUTHORIZATION_REQUIRED\/insufficient_scope:.*?reopen only for old clients\. /su, "");
 
-const isMissingRuntimeProof = result => result?.structuredContent?.code === "TRELIO_RUNTIME_HOOK_REQUIRED"
-  ? result.structuredContent.reason === "missing"
-  : result?.content?.some(block => block.type === "text" && block.text?.startsWith("TRELIO_RUNTIME_HOOK_REQUIRED (missing)"));
+const readNativeRuntimeAdmissionError = result => {
+  if (result?.isError !== true) return null;
+  if (result.structuredContent) return result.structuredContent;
+  // Some SDK tools advertise a success-only output schema. The native
+  // backend emits the same closed category and reason in their text error.
+  for (const block of result.content ?? []) {
+    if (block.type !== "text") continue;
+    const reason = /^TRELIO_RUNTIME_HOOK_REQUIRED \((missing|invalid|expired|replayed)\):/u.exec(block.text)?.[1];
+    if (!reason) continue;
+    const expiredCause = / \[expiredCause=([a-z_]+)\]$/u.exec(block.text)?.[1];
+    return { code: LEGACY_RUNTIME_ADMISSION_CODE, reason, expiredCause };
+  }
+  return null;
+};
 
 /** A separate MCP registration preserves the existing Trelio tool names, schemas
  * and App resources. The local runtime owns only transport and preparation;
@@ -9201,13 +9256,15 @@ export const createDesktopOAuthMcpHandler = (nativeClient, {
           }
         }
         const result = await connection.call(name, args, callSignal, isCodex ? undefined : requestClient);
-        if (!isCodex || args.runtimeSessionProof || !isMissingRuntimeProof(result)) return result;
-        if (pairingRequired) throw pairingRequired;
-        // No metadata came with this protected call. Preserve the denial,
-        // while avoiding legacy advice to enable hooks in the new client.
-        const code = "TRELIO_RUNTIME_OBSERVATION_REQUIRED";
-        const details = { code, reason: "missing",
-          message: "Codex не передал модель текущего хода. Повторите вызов из обычного чата Codex с актуальным клиентом." };
+        if (!isCodex) return result;
+        const admission = readNativeRuntimeAdmissionError(result);
+        const missingObservation = !args.runtimeSessionProof && admission?.reason === "missing";
+        const details = codexRuntimeAdmissionPayload(admission, missingObservation);
+        if (!details) return result;
+        if (missingObservation && pairingRequired) throw pairingRequired;
+        // Diagnostics aggregate the same wire code across client versions.
+        // Only the model-facing error is projected for the new route.
+        if (!missingObservation) failureCode = LEGACY_RUNTIME_ADMISSION_CODE;
         // Match upstream's omitted structured error when a success-only
         // output schema would otherwise make the client reject this result.
         return { ...buildTextResult(details),
@@ -9238,6 +9295,13 @@ export const createDesktopOAuthMcpHandler = (nativeClient, {
           ? error.code : "TRELIO_CODEX_MCP_FAILED";
       if (message.method !== "tools/call") return { jsonrpc: "2.0", id: message.id, error: { code: -32000, message: code } };
       if (authFailure(error)) toolsByName = null;
+      const admission = isCodex
+        ? codexRuntimeAdmissionPayload(runtimeAdmissionErrorPayload(error, safeErrorPayload(error))) : null;
+      if (admission) {
+        return reply({ ...buildTextResult(admission),
+          ...(toolsByName?.get(message.params?.name)?.outputSchema
+            ? {} : { structuredContent: admission }), isError: true });
+      }
       const reason = preparationTimeout ? preparationTimeout.message
         : pairing ? "Вызовите approve_agent_workspace_bridge_pairing с этими полями. После подтверждения повторите исходный вызов один раз."
         : authFailure(error) ? (code === authRequired

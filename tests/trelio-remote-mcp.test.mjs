@@ -52,6 +52,7 @@ import { diagnosePublicTrelioService } from "../host-runtime/scripts/trelio-publ
 import { buildTrelioBootstrapVerification } from "../host-runtime/scripts/trelio-installation-diagnostic.mjs";
 import { ACCOUNT_SETUP_REQUIRED_BRIDGE_EXIT } from "../host-runtime/scripts/trelio-skill-accounts.mjs";
 import { deliverLocalMcpResult } from "../host-runtime/scripts/trelio-mcp-results.mjs";
+import { TrelioLocalContextError } from "../host-runtime/scripts/trelio-local-context.mjs";
 // Ordinary diagnostic fixtures must never probe the real public service.
 const handleToolCall = (origin, name, args, options = {}) => handleToolCallProduction(origin, name, args, {
   publicServiceDiagnosis: async () => ({ state: "available", attempts: [] }), ...options,
@@ -378,6 +379,53 @@ test("local MCP offers account discovery only for the bridge's own setup refusal
     const payload = JSON.parse(unrelated.content[0].text);
     assert.equal(payload.code, "TRELIO_WORKSPACE_ACTION_FAILED");
     assert.equal(payload.details.nextCall, undefined);
+  }
+});
+
+test("local Codex displays an admission refusal once and preserves its safe reason", async () => {
+  const message = { jsonrpc: "2.0", id: 1, method: "tools/call",
+    params: { name: "continue_trelio_workspace_action", arguments: {} } };
+  const seen = [];
+  let calls = 0;
+  const { result } = await handleLocalMcpMessage(message, {
+    codexMcpRuntime: true,
+    callTool: async () => {
+      calls++;
+      throw new TrelioApiError(409, "PRIVATE_FIXTURE", null, "TRELIO_RUNTIME_HOOK_REQUIRED", {
+        reason: "expired", expiredCause: "runtime_session_ended", beforeDispatch: true,
+      });
+    },
+    recordDiagnostic: (_name, _args, code) => seen.push(code),
+  });
+  assert.equal(result.isError, true);
+  const diagnostic = JSON.parse(result.content[0].text);
+  assert.equal(diagnostic.code, "TRELIO_RUNTIME_ADMISSION_REJECTED");
+  assert.equal(diagnostic.reason, "expired");
+  assert.equal(diagnostic.expiredCause, "runtime_session_ended");
+  assert.equal(diagnostic.beforeDispatch, true);
+  assert.doesNotMatch(JSON.stringify(result), /TRELIO_RUNTIME_HOOK_REQUIRED|PRIVATE_FIXTURE/u);
+  assert.deepEqual(seen, ["TRELIO_RUNTIME_HOOK_REQUIRED"]);
+  assert.equal(calls, 1);
+});
+
+test("Codex workspace actions retain the existing narrow skill recovery after expired admission", async () => {
+  const code = "TRELIO_RUNTIME_HOOK_REQUIRED";
+  const httpRuntime = { reason: "expired", expiredCause: "runtime_session_ended", beforeDispatch: true };
+  const recovery = { requiredAction: "reload_agent_skill_in_current_chat", automaticRetry: false };
+  const failure = new TrelioLocalContextError("TRELIO_WORKSPACE_ACTION_FAILED", "Bridge action failed.", {
+    failureCode: code, http: { failureCode: code, runtime: httpRuntime }, recovery,
+  });
+  const message = { jsonrpc: "2.0", id: 1, method: "tools/call",
+    params: { name: "continue_trelio_workspace_action", arguments: {} } };
+  for (const codexMcpRuntime of [true, false]) {
+    const { result } = await handleLocalMcpMessage(message, { codexMcpRuntime, callTool: async () => { throw failure; } });
+    const expected = codexMcpRuntime ? "TRELIO_RUNTIME_ADMISSION_REJECTED" : code;
+    assert.equal(result.isError, true);
+    const payload = JSON.parse(result.content[0].text);
+    assert.equal(payload.code, "TRELIO_WORKSPACE_ACTION_FAILED");
+    assert.deepEqual(payload.details, {
+      failureCode: expected, http: { failureCode: expected, runtime: httpRuntime }, recovery,
+    });
   }
 });
 

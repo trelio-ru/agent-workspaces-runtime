@@ -869,6 +869,12 @@ Optional failure не меняет proof и сохраняет нейтраль�
 или Workspace mutation; видимое `fetch failed` само по себе не доказывает
 10-секундный timeout или потерянный process descriptor.
 
+Codex MCP сообщает `TRELIO_RUNTIME_OBSERVATION_REQUIRED`, если в защищённом
+вызове не было наблюдения. Остальные отказы допуска отображаются как
+`TRELIO_RUNTIME_ADMISSION_REJECTED` с исходным `reason` и доступной причиной
+истечения. `TRELIO_RUNTIME_HOOK_REQUIRED` сохраняется на сервере и в метриках
+ради совместимости. Hooks проверяются по подтверждённому маршруту с хуками.
+
 ### OAuth в Claude, Cursor и Antigravity
 
 Подписанный entrypoint принимает закрытый профиль `mcp --desktop-oauth`
