@@ -1685,6 +1685,9 @@ publication tooling также остаются вне этого публичн
 Exact legacy template bytes для распознавания при миграции не переписывай. [Контракт](docs/agent-workspace-runtime.md).
 
 - [Приватные задачи](docs/agent-workspace-runtime.md#приватные-задачи).
+- Тайм-аут `request_user_approval` – 60 секунд от начала локального вызова.
+  При тайм-ауте агент передаёт ту же вкладку пользователю без повтора запроса.
+  [Контракт](docs/agent-workspace-runtime.md#call-time-budget).
 
 - Human Codex main и его immutable hook-компонент используют тот же verifier и
   retention по [контракту](docs/agent-workspace-runtime.md#human-codex-hook-component).

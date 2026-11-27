@@ -179,12 +179,21 @@ const MAX_CREDENTIAL_BYTES = 16 * 1024;
 const REMOTE_REQUEST_TIMEOUT_MS = 20_000;
 const TRELIO_RESOLVE_TIMEOUT_MS = 20_000;
 const TRELIO_NATIVE_SEARCH_CALL_BUDGET_MS = 140_000;
+const CAPTCHA_APPROVAL_TOOL = "request_user_approval";
+const CAPTCHA_APPROVAL_BUDGET_MS = 60_000;
+const CAPTCHA_APPROVAL_TIMEOUT_MESSAGE = `Запрос одобрения CAPTCHA не завершился за ${CAPTCHA_APPROVAL_BUDGET_MS / 1000} секунд. Передайте пользователю управление той же вкладкой для ручного прохождения CAPTCHA. Не повторяйте запрос.`;
 
-// Match only the admitted native tool name, never an input field naming
-// another operation. The outer clock includes preparation and recovery and
-// caps the native HTTP call even if it starts late. Leave enough time to
-// receive the backend's 120-second cancellation and release the connection.
+// Match only the native tool name, never an input field naming another
+// operation. The outer clock includes preparation and session recovery and
+// caps the HTTP call even if it starts late. Keep the approval limit explicit
+// so a change to the general runtime or Codex client budget cannot extend it.
 const nativeTrelioToolBudget = name => {
+  if (name === CAPTCHA_APPROVAL_TOOL) {
+    return { timeoutMs: CAPTCHA_APPROVAL_BUDGET_MS, timeoutError: () => new TrelioCallTimeoutError({
+      timeoutMs: CAPTCHA_APPROVAL_BUDGET_MS, message: CAPTCHA_APPROVAL_TIMEOUT_MESSAGE,
+    }) };
+  }
+  // Leave enough time for the search backend's own 120-second cancellation.
   if (name !== "search") return {};
   const timeoutMs = TRELIO_NATIVE_SEARCH_CALL_BUDGET_MS;
   return { timeoutMs, timeoutError: () => new TrelioCallTimeoutError({
@@ -9445,7 +9454,10 @@ export const createDesktopOAuthMcpHandler = (nativeClient, {
           ...(toolsByName?.get(message.params?.name)?.outputSchema
             ? {} : { structuredContent: admission }), isError: true });
       }
-      const reason = preparationTimeout ? preparationTimeout.message
+      const approvalTimeout = message.params?.name === CAPTCHA_APPROVAL_TOOL
+        && error instanceof TrelioCallTimeoutError && error.timeoutMs === CAPTCHA_APPROVAL_BUDGET_MS;
+      const reason = approvalTimeout ? CAPTCHA_APPROVAL_TIMEOUT_MESSAGE
+        : preparationTimeout ? preparationTimeout.message
         : pairing ? "Вызовите approve_agent_workspace_bridge_pairing с этими полями. После подтверждения повторите исходный вызов один раз."
         : authFailure(error) ? (code === authRequired
           ? "Подключите Trelio через trelio_connect и продолжите исходный запрос."
@@ -9453,7 +9465,9 @@ export const createDesktopOAuthMcpHandler = (nativeClient, {
         : error instanceof RemoteMcpHostError || error instanceof RemoteMcpOAuthError
           || (error instanceof TrelioCallTimeoutError && error.timeoutMs === TRELIO_NATIVE_SEARCH_CALL_BUDGET_MS) ? error.message
         : "Trelio не смог подготовить или завершить вызов. Для записи сначала проверьте состояние.";
-      const details = { code, message: reason, ...(preparationTimeout ? { stage: "keychain_preparation" } : {}), ...(pairing
+      const details = { code, message: reason,
+        ...(approvalTimeout ? { details: error.toJSON().details } : {}),
+        ...(preparationTimeout ? { stage: "keychain_preparation" } : {}), ...(pairing
         ? { pairingId: pairing.pairingId, deviceName: pairing.deviceName } : {}),
         ...(error instanceof RemoteMcpOAuthError && error.browser ? { browser: error.browser } : {}) };
       return reply({ ...buildTextResult(details),

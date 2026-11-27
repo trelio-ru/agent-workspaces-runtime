@@ -331,6 +331,72 @@ test("Codex uses one 140-second budget for exact native search and its recovery 
   }
 });
 
+test("CAPTCHA approval has one 60-second deadline and requests handoff of the original tab", async t => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const preparationStarted = Promise.withResolvers();
+  const finishPreparation = Promise.withResolvers();
+  const dispatched = Promise.withResolvers();
+  const lateResponse = Promise.withResolvers();
+  const otherDispatched = Promise.withResolvers();
+  const deadlineTool = "request_user_approval";
+  const calls = [];
+  const handler = createCodexMcpHandler({ connect: () => ({
+    listTools: async () => [deadlineTool, "list_projects"].map(name => ({
+      name, inputSchema: { type: "object" },
+    })),
+    call: async (name, _input, signal) => {
+      calls.push(name);
+      if (name === "list_projects") {
+        otherDispatched.resolve(signal);
+        return new Promise(() => {});
+      }
+      dispatched.resolve(signal);
+      // A stuck dependency need not honor abort for Codex to get a result.
+      return lateResponse.promise;
+    },
+  }), prepare: async ({ toolName, input }) => {
+    if (toolName.endsWith(`__${deadlineTool}`)) {
+      preparationStarted.resolve();
+      await finishPreparation.promise;
+    }
+    return input;
+  } });
+  await handler(frame("initialize"), { clientInfo });
+  await handler(frame("tools/list"), { clientInfo });
+
+  const pending = handler(frame("tools/call", { name: deadlineTool }), { clientInfo });
+  await preparationStarted.promise;
+  t.mock.timers.tick(5_000);
+  finishPreparation.resolve();
+  const signal = await dispatched.promise;
+  // The clock starts before preparation and never restarts at HTTP dispatch.
+  t.mock.timers.tick(54_999);
+  assert.equal(signal.aborted, false);
+  t.mock.timers.tick(1);
+
+  const response = await pending;
+  assert.equal(response.result.isError, true);
+  assert.equal(signal.aborted, true);
+  const error = readResult(response);
+  assert.equal(error.code, "TRELIO_CALL_TIMEOUT");
+  assert.deepEqual(error.details, { timeoutMs: 60_000, automaticRetry: false });
+  assert.match(error.message, /той же вкладкой для ручного прохождения CAPTCHA/u);
+  assert.match(error.message, /Не повторяйте запрос/u);
+
+  lateResponse.resolve({ content: [] });
+  const otherCall = handler(frame("tools/call", {
+    name: "list_projects", arguments: { nativeTool: deadlineTool },
+  }), { clientInfo });
+  const otherSignal = await otherDispatched.promise;
+  t.mock.timers.tick(59_999);
+  assert.equal(otherSignal.aborted, false);
+  t.mock.timers.tick(1);
+  const otherError = readResult(await otherCall);
+  assert.equal(otherError.code, "TRELIO_CALL_TIMEOUT");
+  assert.doesNotMatch(otherError.message, /CAPTCHA/u);
+  assert.deepEqual(calls, [deadlineTool, "list_projects"], "neither the late result nor a lookalike input retries approval");
+});
+
 test("explicit catalogue recovery and its subsequent live list both have time beyond startup", async t => {
   t.mock.timers.enable({ apis: ["setTimeout"] });
   const phases = [Promise.withResolvers(), Promise.withResolvers()];
