@@ -3,7 +3,7 @@ import { readUtf16TextChunk, sliceUtf16CodePoints } from "./trelio-context-searc
 import { MCP_UNFILED_CONTEXT_RESPONSE_TOOLS } from "./trelio-unfiled-response-policy.mjs";
 import { readUnfiledResponseContext } from "./trelio-unfiled-context.mjs";
 import { createWorkspaceFinishOperations, createCompanySearchOperations, runWorkspaceFinishProcess } from "./trelio-workspace-finish-progress.mjs";
-import { nativeCodexBridge, nativeCodexBridgeChildEnvironment } from "./trelio-codex-bridge-session.mjs";
+import { nativeCodexBridge, nativeCodexBridgeChildEnvironment } from "./trelio-runtime-chat-binding.mjs";
 import { trelioCallSignal, parseTrelioCallTimeout, withPrivateProcessSession } from "./trelio-hook-private-session.mjs";
 import {
   MIRROR_SCHEMA_VERSION, pruneMirrorSchema, withCompanyMirrorRetentionLock as withMirrorRetentionLock,

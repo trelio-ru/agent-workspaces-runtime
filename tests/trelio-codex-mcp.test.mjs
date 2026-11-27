@@ -15,7 +15,7 @@ import {
 
 import path from "node:path";
 import { loadNativeCodexBridgeToken, nativeCodexBridge, nativeCodexBridgeChildEnvironment,
-  saveNativeCodexBridge, withNativeCodexBridgeChild } from "../host-runtime/scripts/trelio-codex-bridge-session.mjs";
+  saveNativeCodexBridge, withNativeCodexBridgeChild } from "../host-runtime/scripts/trelio-runtime-chat-binding.mjs";
 
 const clientInfo = { name: "codex-mcp-client" };
 const threadId = "019f9fcd-899a-72b3-91f6-fdf3134381bb";

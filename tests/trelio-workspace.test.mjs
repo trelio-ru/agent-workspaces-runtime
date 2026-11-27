@@ -23,7 +23,6 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import { promisify } from "node:util";
 import { applyTrelioFolderOnboarding, prepareTrelioFolderOnboarding } from "../host-runtime/scripts/trelio-folder-onboarding.mjs";
 import { ACCOUNT_SETUP_REQUIRED_BRIDGE_EXIT } from "../host-runtime/scripts/trelio-skill-accounts.mjs";
-import { saveNativeCodexBridge, withNativeCodexBridge } from "../host-runtime/scripts/trelio-codex-bridge-session.mjs";
 
 const TEST_AGENT_RULES_MARKDOWN = "# Platform rules\n\nUse exact typed actions.\n";
 const TEST_AGENT_RULES_SHA256 = createHash("sha256")
@@ -187,7 +186,7 @@ import {
   withEncryptedWorkspaceTransport,
   writePrivateJsonFile,
 } from "../host-runtime/scripts/trelio-workspace.mjs";
-import { saveRuntimeChatBinding } from "../host-runtime/scripts/trelio-runtime-chat-binding.mjs";
+import { saveRuntimeChatBinding, saveNativeCodexBridge, withNativeCodexBridge } from "../host-runtime/scripts/trelio-runtime-chat-binding.mjs";
 import {
   parseWorkspaceDraftRecoveryRequiredError,
   parseWorkspaceLayoutMigrationBlockedError,

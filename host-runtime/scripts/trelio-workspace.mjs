@@ -38,9 +38,8 @@ import {
   readCodexPluginEnablement, readCodexAssistantMarketplaceSource,
 } from "./trelio-codex-routing.mjs";
 import { createFinishRecoveryMarker, hasFinishRecoveryMarker, reusableFinishHandoff } from "./trelio-workspace-finish-recovery.mjs";
-import { readRuntimeChatBinding, normalizeRuntimeChatId } from "./trelio-runtime-chat-binding.mjs";
-import { loadNativeCodexBridgeToken, nativeCodexBridge, nativeCodexBridgeChildEnvironment,
-  withNativeCodexBridgeChild } from "./trelio-codex-bridge-session.mjs";
+import { readRuntimeChatBinding, normalizeRuntimeChatId, loadNativeCodexBridgeToken,
+  nativeCodexBridge, nativeCodexBridgeChildEnvironment, withNativeCodexBridgeChild } from "./trelio-runtime-chat-binding.mjs";
 import {
   WorkspaceActiveRunRequiredError,
   WorkspaceDraftRecoveryRequiredError,

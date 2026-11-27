@@ -2,7 +2,7 @@
 import { sliceUtf16CodePoints, readUtf16TextChunk } from "./trelio-context-search-matching.mjs";
 import { AGENT_SKILL_GUIDES_MINIMUM_HOST, normalizeAgentSkillInstructions, normalizeAgentSkillRoutingSummary, AgentSkillInstructionBudgetError, readAgentSkillSourceMetadata } from "./trelio-agent-skill-budget.mjs";
 import { buildLocalTaskReadToolResult, fitsMcpTaskReadResult } from "./trelio-task-read-budget.mjs";
-import { withNativeCodexBridge } from "./trelio-codex-bridge-session.mjs";
+import { withNativeCodexBridge } from "./trelio-runtime-chat-binding.mjs";
 import { localSearchSelections, selectedSearchLocator } from "./trelio-search-selection.mjs";
 import { createMcpStartupTrace } from "./trelio-mcp-startup-trace.mjs";
 import { withBrowserAccountState, skillResourcePolicy } from "./trelio-browser-session.mjs";

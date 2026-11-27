@@ -10,8 +10,7 @@
  */
 import crypto from "node:crypto";
 import { AsyncLocalStorage } from "node:async_hooks";
-import { saveRuntimeChatBinding, runtimeChatBindingPath } from "./trelio-runtime-chat-binding.mjs";
-import { saveNativeCodexBridge } from "./trelio-codex-bridge-session.mjs";
+import { saveRuntimeChatBinding, runtimeChatBindingPath, saveNativeCodexBridge } from "./trelio-runtime-chat-binding.mjs";
 import { saveRuntimeProofBinding, runtimeProofBindingPath } from "./trelio-runtime-proof-preparation.mjs";
 import { buildDiagnosticObservation, observationCode } from "./trelio-diagnostic-observation.mjs";
 import { writeDiagnosticJournal } from "./trelio-diagnostic-journal.mjs";
