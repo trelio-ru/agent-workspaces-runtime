@@ -1891,6 +1891,8 @@ Exact legacy template bytes для распознавания при мигра�
 - [Signed skill resolve](docs/agent-workspace-runtime.md#signed-skill-resolution)
   combines admission and release resolution using the existing compatibility
   handshake. A rejected combined request never switches to the legacy route.
+  Windows Codex launches use the original read's protected bridge store for
+  the exact skill action even when the two native MCPs have different `LOCALAPPDATA`.
 
 ## Git workflow
 

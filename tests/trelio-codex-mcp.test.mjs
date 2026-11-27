@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
-import test from "node:test";
+import path from "node:path";
+import test, { describe } from "node:test";
 import http from "node:http";
 import { once } from "node:events";
 import { PassThrough } from "node:stream";
@@ -12,6 +13,9 @@ import { RemoteMcpOAuthError } from "../host-runtime/scripts/trelio-remote-mcp-o
 import {
   cleanNativeRuntimeToolArguments, observeCodexMcpTurn, prepareCodexMcpToolArguments,
 } from "../host-runtime/scripts/trelio-runtime-session.mjs";
+
+import { rememberCodexSkillBridge, resolveCodexSkillBridgeToken }
+  from "../host-runtime/scripts/trelio-codex-skill-bridge.mjs";
 
 const clientInfo = { name: "codex-mcp-client" };
 const threadId = "019f9fcd-899a-72b3-91f6-fdf3134381bb";
@@ -1195,4 +1199,80 @@ test("desktop OAuth transport preserves an exact form request on the original SS
     { action: "accept", content: { decision: "dismiss" } },
     { code: -32601, message: "Only MCP form elicitation is supported." },
   ]);
+});
+
+describe("Windows Codex signed skill bridge", () => {
+  const id = n => `019f9fcd-899a-72b3-91f6-fdf3134381b${n}`;
+  const origin = "https://trelio.ru";
+  const codexThreadId = id(1);
+  const parameters = {
+    runtimeSessionId: id(2), companyId: id(3), projectId: id(4),
+    skillId: "consultant-plus", releaseId: id(5), arguments: [],
+  };
+  const binding = { ...parameters, origin, codexThreadId };
+  const bridgeDirectory = "C:\\Users\\example\\AppData\\Local\\Trelio\\workspace-bridge";
+  const localBridgeDirectory = "C:\\Users\\example\\native-mcp\\Trelio\\workspace-bridge";
+  const originalCredential = { bridgeSessionTokenProtected: { ciphertext: "original-dpapi" } };
+  const result = { structuredContent: { runtimeExecution: { localAction: {
+    tool: "continue_trelio_workspace_action", arguments: { schemaVersion: 1, operation: "skill_run", parameters },
+  } } } };
+
+  const fixture = () => {
+    const records = new Map();
+    const privateReads = [];
+    const credentials = path.win32.join(bridgeDirectory, "credentials.json");
+    const now = 1_800_000_000_000;
+    const remember = overrides => rememberCodexSkillBridge({ origin, codexThreadId, bridgeDirectory,
+      proof: { runtimeSessionId: parameters.runtimeSessionId, signature: "private-proof" }, result,
+      homeDirectory: "C:\\Users\\example", now, writePrivateJsonFile: async (file, record) => records.set(file, record),
+      ...overrides,
+    });
+    const resolve = (scope = binding, overrides) => resolveCodexSkillBridgeToken(scope, {
+      localBridgeDirectory, homeDirectory: "C:\\Users\\example", now,
+      readPrivateJsonFile: async file => {
+        privateReads.push(file);
+        return file === credentials ? { [origin]: originalCredential } : records.get(file) ?? {};
+      },
+      readProtectedBridgeSession: async (tokenOrigin, credential) => {
+        assert.equal(tokenOrigin, origin);
+        assert.equal(credential, originalCredential);
+        return "twb_original";
+      },
+      ...overrides,
+    });
+    return { records, privateReads, credentials, remember, resolve, now };
+  };
+
+  test("Windows Codex skill launch uses the bridge that supplied its protected read", async () => {
+    const { records, privateReads, credentials, remember, resolve } = fixture();
+    await remember();
+    assert.equal(records.size, 1);
+    const [locatorFile, locator] = [...records.entries()][0];
+    assert.deepEqual(Object.keys(locator).sort(), ["bridgeDirectory", "expiresAt", "schemaVersion"]);
+    assert.equal(await resolve(), "twb_original");
+    assert.deepEqual(privateReads, [locatorFile, credentials]);
+    assert.equal(await resolve(binding, { localBridgeDirectory: bridgeDirectory.toUpperCase() }), null);
+    assert.deepEqual(privateReads.slice(2), [locatorFile]);
+  });
+
+  test("another Codex chat or action cannot select a bridge and failed reads create no locator", async () => {
+    const { records, privateReads, credentials, remember, resolve, now } = fixture();
+    await remember({ proof: { runtimeSessionId: id(6) } });
+    await remember({ result: { ...result, isError: true } });
+    assert.equal(records.size, 0);
+    await remember();
+    for (const change of [{ codexThreadId: id(6) }, { origin: "https://other.example" },
+      { runtimeSessionId: id(6) }, { companyId: id(6) }, { projectId: null },
+      { skillId: "other-skill" }, { releaseId: id(6) }]) {
+      assert.equal(await resolve({ ...binding, ...change }), null);
+    }
+    assert.equal(await resolve(binding, { now: now + 12 * 60 * 60 * 1000 }), null);
+    assert.equal(privateReads.includes(credentials), false);
+  });
+
+  test("a missing original Windows credential fails without using the launcher's bridge", async () => {
+    const { remember, resolve } = fixture();
+    await remember();
+    await assert.rejects(resolve(binding, { readProtectedBridgeSession: async () => null }), /Paired bridge unavailable/);
+  });
 });

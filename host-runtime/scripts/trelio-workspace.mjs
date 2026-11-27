@@ -39,6 +39,7 @@ import {
 } from "./trelio-codex-routing.mjs";
 import { createFinishRecoveryMarker, hasFinishRecoveryMarker, reusableFinishHandoff } from "./trelio-workspace-finish-recovery.mjs";
 import { readRuntimeChatBinding, normalizeRuntimeChatId } from "./trelio-runtime-chat-binding.mjs";
+import { resolveCodexSkillBridgeToken } from "./trelio-codex-skill-bridge.mjs";
 import {
   WorkspaceActiveRunRequiredError,
   WorkspaceDraftRecoveryRequiredError,
@@ -10484,7 +10485,7 @@ const skillCommand = async (
   origin,
   options,
   positional,
-  { grantedEnvironment = {}, grantedStdin = null, refreshAdmission = false, privateSecretSetup = null, humanInputSetup = null, assistantGuidePart } = {},
+  { grantedEnvironment = {}, grantedStdin = null, refreshAdmission = false, privateSecretSetup = null, humanInputSetup = null, assistantGuidePart, codexSkillThreadId = null } = {},
 ) => {
   const skillSubcommand = positional[0];
   if (assistantGuidePart !== undefined && (skillSubcommand !== "run"
@@ -10538,9 +10539,23 @@ const skillCommand = async (
     throw new Error("Параметр --skill должен содержать lowercase kebab-case id.");
   }
 
-  const token = await requireToken(origin);
-  const compatibility = await ensureBridgeCompatibility(origin, token);
   const profile = currentWorkspaceExecutionProfile();
+  let token;
+  if (!profile && process.platform === "win32" && codexSkillThreadId && runtimeSessionId) {
+    try {
+      token = await resolveCodexSkillBridgeToken({ origin, codexThreadId: codexSkillThreadId,
+        companyId, projectId, skillId, releaseId, runtimeSessionId }, {
+        localBridgeDirectory: CONFIG_DIRECTORY, readPrivateJsonFile,
+        readProtectedBridgeSession: readProtectedWindowsBridgeSession,
+      });
+    } catch {
+      // Private I/O errors may contain a user path. Keep the failure value-free.
+      throw new Error("Не удалось открыть сохранённое подключение Codex для запуска навыка.");
+    }
+  }
+  const crossDirectoryCodexThreadId = token ? codexSkillThreadId : null;
+  token ??= await requireToken(origin);
+  const compatibility = await ensureBridgeCompatibility(origin, token);
   const assistant = profile?.kind === "digital_assistant";
   // Same executor and package/account/secret engine, different admission.
   // Human admission caching must never hold an assistant task's grant alive
@@ -10620,7 +10635,7 @@ const skillCommand = async (
   // recursion cannot repeat because refreshAdmission bypasses this snapshot.
   if (cachedAdmission && !cachedDirectory) {
     return skillCommand(origin, options, positional, {
-      grantedEnvironment, grantedStdin, refreshAdmission: true,
+      grantedEnvironment, grantedStdin, refreshAdmission: true, codexSkillThreadId,
     });
   }
   let runtimeDirectory;
@@ -10690,7 +10705,7 @@ const skillCommand = async (
   // Signed setup always refreshes company config and admission, including a
   // verified package cache hit. The value endpoint repeats every live gate.
   if (setupCommand && cachedAdmission) {
-    return skillCommand(origin, options, positional, { refreshAdmission: true });
+    return skillCommand(origin, options, positional, { refreshAdmission: true, codexSkillThreadId });
   }
   if (!assistant && !cachedAdmission) {
     await saveRuntimeSkillAdmission(admissionKey, token, admissionResolution, admissionCheckedAt);
@@ -10698,15 +10713,13 @@ const skillCommand = async (
   const executionContext = {
     origin, companyId, projectId, releaseId,
     visualAttachmentDiagnostics: options["visual-attachment-diagnostics"] === true,
-    // Resolve the requesting chat on every call, including cached admission.
-    // A persistent MCP can serve several chats and its inherited environment is
-    // neither current nor authoritative. The private hook binding carries only
-    // the exact session/thread identity and preserves that session's deadline.
+    // A cross-directory launch uses its verified native chat. Otherwise carry
+    // the original session's local chat binding, never the inherited process ID.
     runtimeSessionId,
-    codexThreadId: assistant ? await profile.resolveSkillRuntimeChat({companyId,runtimeSessionId}) : runtimeSessionId ? await readRuntimeChatBinding({
-      configDirectory: resolveWorkspaceBridgeConfigDirectory(), origin, runtimeSessionId,
-      readPrivateJsonFile,
-    }) : null,
+    codexThreadId: assistant ? await profile.resolveSkillRuntimeChat({ companyId, runtimeSessionId })
+      : crossDirectoryCodexThreadId ?? (runtimeSessionId ? await readRuntimeChatBinding({
+        configDirectory: resolveWorkspaceBridgeConfigDirectory(), origin, runtimeSessionId, readPrivateJsonFile,
+      }) : null),
     localIdentity: resolution.localIdentity,
     companyConnection: resolution.companyConnection,
   };
@@ -22028,6 +22041,7 @@ const runUpdatedBridgeEntrypoint = async (
   {
     environment = process.env,
     spawnProcess = spawn,
+    input,
   } = {},
 ) => (
   new Promise((resolve, reject) => {
@@ -22040,10 +22054,14 @@ const runUpdatedBridgeEntrypoint = async (
           TRELIO_WORKSPACE_AUTO_UPDATE_REEXEC: "1",
         },
         shell: false,
-        stdio: "inherit",
+        stdio: input === undefined ? "inherit" : ["pipe", "inherit", "inherit"],
         windowsHide: true,
       },
     );
+    if (input !== undefined) {
+      child.stdin.on("error", () => {});
+      child.stdin.end(input);
+    }
     child.once("error", reject);
     child.once("exit", (exitCode, signal) => {
       if (signal) {
@@ -22063,14 +22081,19 @@ const runStableHostRuntimeLoader = async (
     environmentOverrides = {},
     allowNonzeroExit = false,
     spawnProcess = spawn,
+    input,
   } = {},
 ) => await new Promise((resolve, reject) => {
   const child = spawnProcess(process.execPath, [loaderPath, ...argumentsList], {
     env: { ...environment, ...environmentOverrides },
     shell: false,
-    stdio: "inherit",
+    stdio: input === undefined ? "inherit" : ["pipe", "inherit", "inherit"],
     windowsHide: true,
   });
+  if (input !== undefined) {
+    child.stdin.on("error", () => {});
+    child.stdin.end(input);
+  }
   child.once("error", reject);
   child.once("exit", (exitCode, signal) => {
     if (signal) {
@@ -22099,6 +22122,7 @@ export const recoverBridgeHostRuntimeUpgrade = async (
     spawnProcess = spawn,
     statFile = fs.lstat,
     accessFile = fs.access,
+    input,
   } = {},
 ) => {
   if (
@@ -22138,6 +22162,7 @@ export const recoverBridgeHostRuntimeUpgrade = async (
         },
         allowNonzeroExit: true,
         spawnProcess,
+        input,
       },
     );
     // После запуска bridge нельзя заключить, что mutation не состоялась.
@@ -22211,6 +22236,7 @@ export const recoverBridgePluginUpgrade = async (
     loadedPluginDirectory = LOADED_CODEX_PLUGIN_DIRECTORY,
     loadedPluginVersion = PLUGIN_VERSION,
     retentionDirectory = CODEX_PLUGIN_RETENTION_DIRECTORY,
+    input,
   } = {},
 ) => {
   if (!(error instanceof BridgePluginUpgradeRequiredError)) {
@@ -22309,7 +22335,7 @@ export const recoverBridgePluginUpgrade = async (
     const exitCode = await runUpdatedBridgeEntrypoint(
       installation.bridgePath,
       rawArguments,
-      { environment, spawnProcess },
+      { environment, spawnProcess, input },
     );
     return { handled: true, exitCode };
   } catch (reexecError) {
@@ -22326,7 +22352,8 @@ export const recoverBridgePluginUpgrade = async (
 };
 
 export const runWorkspaceCommand = async (rawArguments = process.argv.slice(2), { assistantGuidePart, retainedAssistantFinish, retainedAssistantHandoff,
-  retainedTaskHandoff, portableFinish, localDraftRecovery, assistantMaterializationSignal, assertAssistantMaterializationCurrent } = {}) => {
+  retainedTaskHandoff, portableFinish, localDraftRecovery, assistantMaterializationSignal, assertAssistantMaterializationCurrent,
+  readCodexSkillThread = async () => null } = {}) => {
   const { command, options, positional } = parseArguments(rawArguments);
   const origin = normalizeOrigin(options.origin || DEFAULT_ORIGIN);
 
@@ -22398,7 +22425,10 @@ export const runWorkspaceCommand = async (rawArguments = process.argv.slice(2), 
   } else if (command === "merge") {
     await mergeWorkspaceRun(options);
   } else if (command === "skill") {
-    return skillCommand(origin, options, positional, { assistantGuidePart });
+    const codexSkillThreadId = !currentWorkspaceExecutionProfile() && process.platform === "win32"
+      && positional[0] === "run" && options["codex-skill-thread-input"] === true
+      ? await readCodexSkillThread() : null;
+    return skillCommand(origin, options, positional, { assistantGuidePart, codexSkillThreadId });
   } else if (command === "secret") {
     if (positional[0] === "set") {
       await setSecretValue(options, positional);
@@ -22415,17 +22445,26 @@ export const runWorkspaceCommand = async (rawArguments = process.argv.slice(2), 
 };
 
 const runEntrypoint = async () => {
+  let skillThreadInput;
   try {
-    await withPrivateProcessSession(() => runWorkspaceCommand());
+    await withPrivateProcessSession(() => runWorkspaceCommand(undefined, {
+      readCodexSkillThread: async () => {
+        // A hard compatibility gate may re-exec the command. Preserve the
+        // already consumed private input over the replacement child's pipe.
+        const threadId = await readCodexNavigationThreadId(process.stdin);
+        skillThreadInput = threadId ?? "";
+        return threadId;
+      },
+    }));
   } catch (error) {
-    const runtimeRecovery = await recoverBridgeHostRuntimeUpgrade(error);
+    const runtimeRecovery = await recoverBridgeHostRuntimeUpgrade(error, { input: skillThreadInput });
 
     if (runtimeRecovery.handled) {
       process.exitCode = runtimeRecovery.exitCode;
       return;
     }
 
-    const recovery = await recoverBridgePluginUpgrade(runtimeRecovery.error);
+    const recovery = await recoverBridgePluginUpgrade(runtimeRecovery.error, { input: skillThreadInput });
 
     if (recovery.handled) {
       process.exitCode = recovery.exitCode;

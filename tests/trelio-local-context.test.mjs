@@ -794,6 +794,28 @@ test("live MCP host renews an opened Run every twenty minutes", async () => {
   assert.equal(scheduled[1].delayMilliseconds, WORKSPACE_RUN_AUTO_HEARTBEAT_INTERVAL_MS);
 });
 
+test("Windows signed skill dispatch forwards only the native Codex thread over private stdin", async () => {
+  const parameters = { companyId: actionWorkspaceId, skillId: "example-skill", releaseId: actionReleaseId,
+    runtimeSessionId: actionRunId, arguments: ["account", "list"] };
+  const action = { schemaVersion: 1, operation: "skill_run", parameters };
+  const origin = "https://trelio.example";
+  const codexThreadId = "019f9fcd-899a-72b3-91f6-fdf3134381bb";
+  const calls = [];
+  const runBridge = async (_origin, args, options) => {
+    calls.push({ args, input: options.input });
+    return { stdout: "OK", stderr: "" };
+  };
+  await handleTrelioWorkspaceActionOperation(origin, action, { platform: "win32", codexThreadId, runBridge });
+  await handleTrelioWorkspaceActionOperation(origin, action, { platform: "darwin", codexThreadId, runBridge });
+  await handleTrelioWorkspaceActionOperation(origin, action, { platform: "win32", runBridge });
+  const original = buildTrelioWorkspaceActionInvocation(action).argumentsList;
+  assert.deepEqual(calls, [
+    { args: [...original.slice(0, -3), "--codex-skill-thread-input", "--", "account", "list"], input: codexThreadId },
+    { args: original, input: undefined },
+    { args: original, input: undefined },
+  ]);
+});
+
 test("expired background heartbeat claims the same Run with the original open action", async () => {
   const scheduled = [];
   const calls = [];

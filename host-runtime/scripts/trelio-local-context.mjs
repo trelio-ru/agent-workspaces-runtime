@@ -11804,6 +11804,7 @@ const executeTrelioWorkspaceActionOperation = async (
     selectOpenRecovery,
     codexThreadId = null,
     managedBrowserFill = false,
+    platform = process.platform,
   } = {},
 ) => {
   const invocation = buildTrelioWorkspaceActionInvocation(rawInput, { managedBrowserFill });
@@ -11843,16 +11844,18 @@ const executeTrelioWorkspaceActionOperation = async (
         invocation.operation === "open" ? invocation.parameters : undefined,
       );
     }
-    // Keep the ID out of model-visible arguments, child argv and persisted
-    // Run metadata. Only open consumes this pipe. Automatic reclaim reuses
-    // the exact original open and its private input in this process.
+    // The native chat ID travels only in the private bridge pipe. For a
+    // signed skill it selects the same bridge that supplied the exact skill
+    // action, even when the two Codex processes have different Windows roots.
     const openInput = invocation.operation === "open" && !invocation.parameters.runtimeSessionId
       ? codexThreadId ?? undefined : undefined;
-    const bridgeArguments = openInput
-      ? [...invocation.argumentsList, "--codex-navigation-input"]
-      : invocation.argumentsList;
+    const skillInput = platform === "win32" && invocation.operation === "skill_run" && invocation.parameters.runtimeSessionId
+      ? codexThreadId ?? undefined : undefined;
+    const bridgeArguments = [...invocation.argumentsList];
+    if (openInput) bridgeArguments.push("--codex-navigation-input");
+    if (skillInput) bridgeArguments.splice(bridgeArguments.indexOf("--"), 0, "--codex-skill-thread-input");
     const input = invocation.parameters.nativeInput
-      ? JSON.stringify(invocation.parameters.nativeInput) : openInput;
+      ? JSON.stringify(invocation.parameters.nativeInput) : openInput ?? skillInput;
     const result = await runBridge(origin, bridgeArguments, {
       ...(workingDirectory ? { cwd: workingDirectory } : {}),
       signal,

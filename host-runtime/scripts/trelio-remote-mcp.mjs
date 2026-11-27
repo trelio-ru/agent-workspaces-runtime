@@ -2,6 +2,7 @@
 import { sliceUtf16CodePoints, readUtf16TextChunk } from "./trelio-context-search-matching.mjs";
 import { AGENT_SKILL_GUIDES_MINIMUM_HOST, normalizeAgentSkillInstructions, normalizeAgentSkillRoutingSummary, AgentSkillInstructionBudgetError, readAgentSkillSourceMetadata } from "./trelio-agent-skill-budget.mjs";
 import { buildLocalTaskReadToolResult, fitsMcpTaskReadResult } from "./trelio-task-read-budget.mjs";
+import { rememberCodexSkillBridge } from "./trelio-codex-skill-bridge.mjs";
 import { localSearchSelections, selectedSearchLocator } from "./trelio-search-selection.mjs";
 import { createMcpStartupTrace } from "./trelio-mcp-startup-trace.mjs";
 import { withBrowserAccountState, skillResourcePolicy } from "./trelio-browser-session.mjs";
@@ -7180,7 +7181,9 @@ export const handleLocalMcpMessage = async (
       const nativeCodex = clientInfo?.name === "codex-mcp-client";
       const codexThreadId = nativeCodex && (message.params?.name === "open_codex_connection_wizard"
         || message.params?.name === CODEX_CONNECTION_PRESENTATION
-        || (message.params?.name === TRELIO_WORKSPACE_ACTION_TOOL.name && message.params?.arguments?.operation === "open"))
+        || (message.params?.name === TRELIO_WORKSPACE_ACTION_TOOL.name
+          && (message.params?.arguments?.operation === "open"
+            || (codexMcpRuntime && message.params?.arguments?.operation === "skill_run"))))
         ? normalizeCodexNavigationThreadId(message.params?._meta?.threadId)
         : null;
       const execute = async (callSignal) => {
@@ -9386,6 +9389,13 @@ export const createDesktopOAuthMcpHandler = (nativeClient, {
         }
         const result = await connection.call(name, args, callSignal, isCodex ? undefined : requestClient);
         if (!isCodex) return result;
+        if (process.platform === "win32" && name === "get_agent_skill" && args.runtimeSessionProof) {
+          await rememberCodexSkillBridge({
+            origin: DEFAULT_ORIGIN, codexThreadId: normalizeCodexNavigationThreadId(metadata?.threadId),
+            proof: args.runtimeSessionProof, result, bridgeDirectory: resolveWorkspaceBridgeConfigDirectory(),
+            writePrivateJsonFile,
+          });
+        }
         const admission = readNativeRuntimeAdmissionError(result);
         const missingObservation = !args.runtimeSessionProof && admission?.reason === "missing";
         const details = codexRuntimeAdmissionPayload(admission, missingObservation);

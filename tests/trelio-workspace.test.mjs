@@ -1044,9 +1044,13 @@ test("runtime-host upgrade remains a runtime error and does not trigger plugin r
 
 test("runtime-host gate refreshes the signed runtime and re-dispatches the exact bridge command", async () => {
   const calls = [];
+  const threadId = "019f9fcd-899a-72b3-91f6-fdf3134381bb";
+  const rawArguments = ["skill", "run", "--codex-skill-thread-input", "--", "account", "list"];
+  const received = [];
   const spawnProcess = (command, argumentsList, options) => {
     calls.push({ command, argumentsList, options });
     const child = new EventEmitter();
+    child.stdin = Object.assign(new EventEmitter(), { end: input => received.push(input) });
     queueMicrotask(() => { child.emit("exit", 0, null); child.emit("close", 0, null); });
     return child;
   };
@@ -1058,7 +1062,8 @@ test("runtime-host gate refreshes the signed runtime and re-dispatches the exact
     { minimumRuntimeVersion: "2.3.1" },
   );
   const recovery = await recoverBridgeHostRuntimeUpgrade(error, {
-    rawArguments: ["open", "--workspace", "workspace-id"],
+    rawArguments,
+    input: threadId,
     environment: {
       TRELIO_PLUGIN_ROOT: path.join(path.sep, "trusted", "plugin"),
       TRELIO_HOST_RUNTIME_VERSION: "2.2.3",
@@ -1076,12 +1081,10 @@ test("runtime-host gate refreshes the signed runtime and re-dispatches the exact
     "__update",
   ]);
   assert.equal(calls[0].options.env.TRELIO_HOST_RUNTIME_UPDATE_WAIT_FOR_LOCK, "1");
-  assert.deepEqual(calls[1].argumentsList.slice(1), [
-    "bridge",
-    "open",
-    "--workspace",
-    "workspace-id",
-  ]);
+  assert.deepEqual(calls[0].options.stdio, ["ignore", "ignore", "pipe"]);
+  assert.deepEqual(calls[1].argumentsList.slice(1), ["bridge", ...rawArguments]);
+  assert.deepEqual(calls[1].options.stdio, ["pipe", "inherit", "inherit"]);
+  assert.deepEqual(received, [threadId]);
   assert.equal(calls[1].options.env.TRELIO_HOST_RUNTIME_UPDATE_REEXEC, "1");
   assert.equal(calls[1].options.env.TRELIO_HOST_RUNTIME_DISABLE_AUTO_UPDATE, "1");
 });
