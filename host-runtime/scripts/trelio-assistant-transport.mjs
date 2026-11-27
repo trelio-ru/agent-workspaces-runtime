@@ -3316,6 +3316,32 @@ export const createAssistantDeviceClient = ({ origin, assistantId, deviceId, sto
     async retireTaskWriter(input,signal){
       return taskWriterRetirement(input,'retire',signal);
     },
+    async settleCarriedAnswer(retirement,previousReceiptId,review,observe,signal){
+      const old=validateAssistantTaskWriterRetirement(retirement);
+      const {schemaVersion:_version,state:_state,receiptId,assistantId:owner,deviceId:device,...scope}=old;
+      if(owner!==assistantId||device!==deviceId||typeof observe!=='boolean')fail('ASSISTANT_TRANSPORT_INVALID_INPUT');
+      review=validateAssistantScheduledReview(review);
+      const acceptedReconciliationReceiptId=id(previousReceiptId);
+      let value;
+      try{
+        value=await call('passWriterRetirement',{...scope,action:observe?'read_settlement':'settle_read_only',
+          clientRequestId:receiptId,writerRetirementReceiptId:receiptId,acceptedReconciliationReceiptId,review},signal);
+      }catch(error){
+        // An older backend does not understand the new exact observation.
+        if(observe&&error instanceof AssistantTransportError&&error.status===400&&error.code==='ASSISTANT_TRANSPORT_REJECTED')return null;
+        throw error;
+      }
+      if(value?.schemaVersion===1&&observe&&value.state==='pending'
+        &&Object.keys(value).sort().join(',')==='schemaVersion,state')return {state:'pending'};
+      const expected={...scope,assistantId,deviceId,schemaVersion:1,state:'read_only_settled',
+        writerRetirementReceiptId:receiptId,acceptedReconciliationReceiptId,sourceTurnId:review.sourceTurnId};
+      if(value?.schemaVersion!==1||value.state!==expected.state||!object(value.receipt)
+        ||Object.keys(value).sort().join(',')!=='receipt,schemaVersion,state'
+        ||Object.keys(value.receipt).length!==Object.keys(expected).length+1
+        ||Object.entries(expected).some(([key,field])=>value.receipt[key]!==field)||value.receipt.receiptId===receiptId)
+        fail('ASSISTANT_TRANSPORT_INVALID_RESPONSE');
+      return {state:expected.state,receiptId:id(value.receipt.receiptId)};
+    },
     async readTaskRetiredOutcomeEvidence(retirement,witness,signal){
       const receipt=validateAssistantTaskWriterRetirement(retirement);
       if(receipt.assistantId!==assistantId||receipt.deviceId!==deviceId)fail('ASSISTANT_TRANSPORT_INVALID_INPUT');

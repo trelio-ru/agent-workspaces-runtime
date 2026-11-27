@@ -139,6 +139,13 @@ const historicalTaskSkillReads=[{
   // also checks the publication, package digest and revocation under lock.
   terminalOnly:true,accepts:historicalTelegramHistoryRead,
 },{
+  skillId:'telegram-mtproto',releaseId:'10537164-64a7-4224-99e6-b1dd6b743091',
+  packageSha256:'195f1192cc992a5a900a854bb4275aae446b7b5e1a36fc279a5f030536c918d2',
+  // Source 91dbbad52cb9a0d043bf2424c7bcca482268764d. Only its guide reader is
+  // grandfathered. instruction_guides.py returns the fixed packaged files
+  // before provider/credential I/O. Account inventory needs its normal proof.
+  terminalOnly:true,accepts:arguments_=>arguments_.length===1&&arguments_[0]==='guides',
+},{
   ...historicalEmailRelease,terminalOnly:true,accepts:historicalEmailMetadataRead,
 }];
 export const reviewedAssistantHistoricalSkillRead = ({skillId,releaseId},{providerArguments,accountId},{terminal=false}={})=>{

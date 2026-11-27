@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { createHash, randomUUID } from 'node:crypto';
 import test from 'node:test';
 import {
-  assistantNativePrompt, assistantRetiredCheckpointMaterial, assistantWorkStateContext,
+  assistantCarriedAnswerReadOnly, assistantNativePrompt, assistantRetiredCheckpointMaterial, assistantWorkStateContext,
 } from '../host-runtime/scripts/trelio-assistant-codex.mjs';
 
 const digest = text => createHash('sha256').update(text, 'utf8').digest('hex');
@@ -72,6 +72,39 @@ test('missing authority, ambiguous material or later changes cannot attest the s
     const { turn, scope, deliveryId } = example();
     invalidate(turn);
     assert.equal(assistantRetiredCheckpointMaterial(turn, deliveryId, scope), null, invalidate.toString());
+  }
+});
+
+test('a carried answer releases the fence only after the whole original and inspection are read-only', () => {
+  const { turn: original, scope, deliveryId, expected } = example();
+  const siteOrigin = 'https://mail.google.com';
+  const browser = (operation, args, state) => ({
+    type: 'mcpToolCall', server: 'trelio-assistant', tool: 'use_assistant_browser', status: 'completed',
+    arguments: { taskPass: scope.taskPass, siteOrigin, command: { operation, args } },
+    result: { content: [{ type: 'text', text: JSON.stringify({ state, reason: 'none' }) }] },
+  });
+  const failed = browser('screenshot', {}, 'ready');
+  failed.status = 'failed';
+  failed.result = { isError: true, structuredContent: { code: 'ASSISTANT_RUNTIME_REQUEST_INVALID_VALUE_FRAME' } };
+  original.items.push(browser('navigate', { url: siteOrigin + '/mail/u/0/#chat/home' }, 'preparing'), failed,
+    browser('status', {}, 'ready'), browser('close', {}, 'closed'));
+  const read = { type: 'mcpToolCall', server: 'trelio-assistant', tool: 'get_task', status: 'completed',
+    arguments: { taskPass: scope.taskPass }, result: { structuredContent: { tasks: [] } } };
+  const inspection = { status: 'completed', items: [{ type: 'userMessage' }, read] };
+  assert.deepEqual(assistantCarriedAnswerReadOnly({ original, inspection }, deliveryId, scope), expected);
+  for (const alter of [
+    ({original}) => { original.items.pop(); },
+    ({original}) => { original.items.at(-2).arguments.command = { operation: 'click', args: {} }; },
+    ({original}) => { original.items.at(-4).arguments.command.args.url = siteOrigin + '/mail/u/0/#chat/room'; },
+    ({original}) => { original.items.at(-3).result.structuredContent.code = 'UNKNOWN_BROWSER_EFFECT'; },
+    ({original}) => { original.items.push({ type: 'commandExecution' }); },
+    ({original}) => { original.items.push({ ...read, tool: 'complete_assistant_pass' }); },
+    ({inspection}) => { inspection.items.push({ ...read, tool: 'prepare_assistant_workspace_run' }); },
+    ({inspection}) => { inspection.items[1].arguments.taskPass.passId = randomUUID(); },
+  ]){
+    const candidate=structuredClone({original,inspection});
+    alter(candidate);
+    assert.equal(assistantCarriedAnswerReadOnly(candidate,deliveryId,scope),null);
   }
 });
 

@@ -654,9 +654,13 @@ export const assistantSourceProcessingReferences=value=>{
 // For SELECTs whose delivery table is aliased as d. A historical interrupted
 // turn remains in the journal. Its independently confirmed successor removes
 // only that original from current-work, capacity and idle-maintenance views.
-export const ASSISTANT_DELIVERY_WITHOUT_COMPLETED_SUCCESSOR=`NOT EXISTS (
+const deliveryWithoutCompletedSuccessor=`NOT EXISTS (
   SELECT 1 FROM assistant_retired_answer_deliveries h JOIN assistant_inbox_deliveries n ON n.delivery_id=h.delivery_id
   WHERE h.original_id=d.delivery_id AND n.state='complete')`;
+export const ASSISTANT_DELIVERY_WITHOUT_COMPLETED_SUCCESSOR=`${deliveryWithoutCompletedSuccessor}
+  AND NOT EXISTS (SELECT 1 FROM assistant_retired_task_writers w WHERE w.read_only_settlement_receipt_id IS NOT NULL
+    AND (w.delivery_id=d.delivery_id OR w.delivery_id IN (
+      SELECT h.delivery_id FROM assistant_retired_answer_deliveries h WHERE h.original_id=d.delivery_id)))`;
 
 export const readAssistantInboxDispatchSummary = ({ database: db, identity, companies }) => {
   if (!db || typeof db.prepare !== 'function' || !Array.isArray(companies) || companies.length > 256) inputError();
@@ -673,7 +677,7 @@ export const readAssistantInboxDispatchSummary = ({ database: db, identity, comp
     // dispatch diagnostics unavailable and prevents its health recovery. This
     // does not admit old schedule executors, interpret clocks or migrate state;
     // unknown/multiple versions and all retained uncertainty still fail closed.
-    if(versions.length!==1||![10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31,32,33,34,35,36,37,38].includes(versions[0].version)||schedules.length!==1||![1,2].includes(schedules[0].version))
+    if(versions.length!==1||![10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31,32,33,34,35,36,37,38,39].includes(versions[0].version)||schedules.length!==1||![1,2].includes(schedules[0].version))
       fail('ASSISTANT_INBOX_UNSUPPORTED_SCHEMA');
     // Scheduler keys already index the canonical task scope. Keep this bounded
     // structural map inside the reader instead of a quadratic JSON join for
@@ -715,7 +719,8 @@ export const readAssistantInboxDispatchSummary = ({ database: db, identity, comp
     // health recovery still requires the separate real business completion.
     const uncertainIntakes=retainedIntakes.filter(row=>row.state!=='waiting_owner'
       ||row.outcome_state!=='waiting_owner'||!UUID.test(row.outcome_receipt??'')).length;
-    const currentOnly=versions[0].version>=36?` AND ${ASSISTANT_DELIVERY_WITHOUT_COMPLETED_SUCCESSOR}`:'';
+    const currentOnly=versions[0].version>=39?` AND ${ASSISTANT_DELIVERY_WITHOUT_COMPLETED_SUCCESSOR}`
+      :versions[0].version>=36?` AND ${deliveryWithoutCompletedSuccessor}`:'';
     result.uncertainDeliveries=get(`SELECT count(*) AS n FROM assistant_inbox_deliveries d
       WHERE (state IN ('started','uncertain') OR state='leased' AND native_started=1)${currentOnly}`).n+uncertainIntakes;
     if(versions[0].version>=27){
@@ -780,7 +785,7 @@ export function createAssistantInbox({ database: db, now = Date.now, onDeliveryC
   if(rebuilding&&foreignKeys){db.exec('PRAGMA foreign_keys=OFF');if(get('PRAGMA foreign_keys').foreign_keys!==0)fail('ASSISTANT_INBOX_CONFLICT');}
   try{transaction(() => {
     const versions = all('SELECT version FROM assistant_inbox_meta');
-    if (versions.length && (versions.length !== 1 || ![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31,32,33,34,35,36,37,38].includes(versions[0].version))) fail('ASSISTANT_INBOX_UNSUPPORTED_SCHEMA');
+    if (versions.length && (versions.length !== 1 || ![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31,32,33,34,35,36,37,38,39].includes(versions[0].version))) fail('ASSISTANT_INBOX_UNSUPPORTED_SCHEMA');
     if(versions[0]?.version>=14&&!get("SELECT name FROM sqlite_master WHERE type='table' AND name='assistant_pass_continuations'"))
       fail('ASSISTANT_INBOX_CONFLICT'); // Missing history is corruption, never a fresh retry budget.
     db.exec(`
@@ -1086,6 +1091,9 @@ export function createAssistantInbox({ database: db, now = Date.now, onDeliveryC
     // correction gets a distinct terminal fence across restarts and rollback.
     if(!retiredColumns.includes('outcome_repair_marker'))db.exec(`ALTER TABLE assistant_retired_task_writers
       ADD COLUMN outcome_repair_marker TEXT`);
+    if(versions[0]?.version>=39&&!retiredColumns.includes('read_only_settlement_receipt_id'))fail('ASSISTANT_INBOX_CONFLICT');
+    if(!retiredColumns.includes('read_only_settlement_receipt_id'))
+      db.exec('ALTER TABLE assistant_retired_task_writers ADD COLUMN read_only_settlement_receipt_id TEXT');
     // One normal wake delivery can succeed one stopped schedule. Keep the
     // original receipt and business uncertainty. A restart recovers exactly
     // the same begin arguments; it cannot select another answer or task.
@@ -2932,7 +2940,7 @@ export function createAssistantInbox({ database: db, now = Date.now, onDeliveryC
     pendingReconciliationTasks(){
       return all(`SELECT w.delivery_id FROM assistant_retired_task_writers w
         JOIN assistant_inbox_deliveries d ON d.delivery_id=w.delivery_id
-        WHERE w.released=1 AND d.state='uncertain' AND (d.scheduled=1 OR EXISTS
+        WHERE w.released=1 AND w.read_only_settlement_receipt_id IS NULL AND d.state='uncertain' AND (d.scheduled=1 OR EXISTS
           (SELECT 1 FROM assistant_retired_answer_deliveries a WHERE a.delivery_id=d.delivery_id AND d.native_started=1 AND a.draft_basis_json IS NOT NULL))
           AND NOT ${establishedAnswer} AND NOT EXISTS(SELECT 1 FROM assistant_reconciliation_deliveries h WHERE h.delivery_id=d.delivery_id)
         ORDER BY d.expires_at,w.delivery_id`).map(row=>this.readDelivery(row.delivery_id));
@@ -2973,6 +2981,38 @@ export function createAssistantInbox({ database: db, now = Date.now, onDeliveryC
     firstScheduledMaterial(id){
       const link=get("SELECT delivery_id FROM assistant_reconciliation_deliveries WHERE original_id=? AND previous_receipt_id='' AND scheduled_material_json IS NOT NULL",uuid(id));
       return link?this.readReconciliation(link.delivery_id).scheduledMaterial:null;
+    },
+    carriedAnswerBasis(id){
+      const row=delivery(id),writer=readRetiredWriter(row);
+      if(row.scheduled||!writer?.released||writer.outcomeMarker||this.readPassContinuation(id))return null;
+      const saved=get(`SELECT inspection_started,read_only_settlement_receipt_id FROM assistant_retired_task_writers
+        WHERE delivery_id=?`,id);
+      if(saved.inspection_started!==1||saved.read_only_settlement_receipt_id!==null)return null;
+      const source=this.readRetiredAnswer(id),event=deliveryEvents(id)[0];
+      if(!source?.localDraft||!event||!get(`SELECT 1 FROM assistant_inbox_events WHERE event_key=? AND source_key=?
+        AND task_id=? AND original_task_id=task_id AND dispatch_source_key IS NULL AND acked=1 AND dispatched=0 AND processed=0 AND wake=1`,
+      event.event_key,row.source_key,row.task_id))return null;
+      const last=get(`SELECT d.state,d.external_receipt,h.scheduled_material_json FROM assistant_reconciliation_deliveries h
+        JOIN assistant_inbox_deliveries d ON d.delivery_id=h.delivery_id WHERE h.original_id=? ORDER BY h.rowid DESC LIMIT 1`,id);
+      const previousReceiptId=last?.external_receipt?.split(':')[1];
+      if(last?.state!=='complete'||!last.scheduled_material_json||!UUID.test(previousReceiptId??''))return null;
+      return {source,eventKey:event.event_key,previousReceiptId,material:this.firstScheduledMaterial(id)};
+    },
+    recordCarriedAnswerSettlement(id,retirementId,previousReceiptId,receiptId){
+      return transaction(()=>{
+        const writer=readRetiredWriter(delivery(id));
+        if(!writer?.released||writer.receipt.receiptId!==uuid(retirementId))fail('ASSISTANT_INBOX_CONFLICT');
+        const saved=get('SELECT read_only_settlement_receipt_id AS id FROM assistant_retired_task_writers WHERE delivery_id=?',id);
+        if(saved.id===uuid(receiptId))return;
+        const accepted=this.carriedAnswerBasis(id);
+        if(saved.id!==null||accepted?.previousReceiptId!==uuid(previousReceiptId)||!accepted.material)fail('ASSISTANT_INBOX_CONFLICT');
+        // The old owner notification was read and its WORK is accepted. Close
+        // just that local delivery event so it cannot wake again. Do not
+        // change the old delivery's state, provider events or the schedule.
+        run('UPDATE assistant_inbox_events SET dispatched=1,processed=1 WHERE event_key=?',accepted.eventKey);
+        run('UPDATE assistant_retired_task_writers SET read_only_settlement_receipt_id=? WHERE delivery_id=?',receiptId,id);
+        run('UPDATE assistant_inbox_meta SET version=39 WHERE version<39');
+      });
     },
     claimReconciliation(id,retirementId,previousReceiptId=null,ownerWake=null,scheduledMaterial=null){
       return transaction(()=>{

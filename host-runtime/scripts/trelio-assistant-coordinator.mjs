@@ -2416,6 +2416,38 @@ export const createAssistantCoordinator = ({ database, client, native, workspace
               path,beforeSha256,afterSha256};
           }
           retained={...retained,review:{...retained.review,dueAt:plan.nextRunAt}};
+          const carried=inbox.carriedAnswerBasis(deliveryId);
+          if(carried&&typeof client.settleCarriedAnswer==='function'){
+            const cwd=await workspaceForTask(scopeFor(scope,taskId));
+            const ownsReleasedWriter=async()=>await native.readWriterReleased(receipt.threadId,cwd,{signal})===true
+              &&await passHost.readActivePass()===null;
+            if(!await authorize({scope,taskId},signal)||!await ownsReleasedWriter())continue;
+            lease();signal.throwIfAborted();
+            // Read back before a mutation. A previous worker may have received
+            // a timeout after the server committed the same immutable receipt.
+            // That case can no longer use the separate eligibility reader.
+            let settlement=await client.settleCarriedAnswer(receipt,carried.previousReceiptId,retained.review,true,signal);
+            if(settlement?.state==='pending'){
+              const witness=await native.readDelivery(receipt.threadId,deliveryId,{signal,carriedAnswer:{
+                assistantId:identity.assistantId,taskPass:{companyId:receipt.companyId,taskId,passId:receipt.passId},
+                questionId:source.request.review.pendingOwnerCheck.questionId,workspaceId:retained.review.workspaceId,
+                runId:retained.review.runId,retirementReceiptId:receipt.receiptId}});
+              const {path,beforeSha256,afterSha256}=retained;
+              const {sourceTurnId,workspaceId,runId,checkpointId,draftHead}=retained.review;
+              if(witness?.state==='carried_answer_read_only'&&isDeepStrictEqual(witness.material,{
+                path,beforeSha256,afterSha256,sourceTurnId,workspaceId,runId,checkpointId,draftHead})
+                &&await ownsReleasedWriter()){
+                lease();signal.throwIfAborted();
+                if(findSchedule(scope,taskId)?.nextRunAt!==retained.review.dueAt)continue;
+                settlement=await client.settleCarriedAnswer(receipt,carried.previousReceiptId,retained.review,false,signal);
+              }
+            }
+            if(settlement?.state==='read_only_settled'){
+              lease();signal.throwIfAborted();
+              inbox.recordCarriedAnswerSettlement(deliveryId,receipt.receiptId,carried.previousReceiptId,settlement.receiptId);
+              return {state:'retired_settled',kind:'task'};
+            }
+          }
         }
         const current=await client.readTaskRecoveryContext({...receipt,expectedLeaseRevision:receipt.leaseRevision,
           writerRetirement:receipt,...(retained?{scheduled:retained.review}:{reconcile:true}),...(wake?{notificationId:wake.notificationId}:{})},signal);

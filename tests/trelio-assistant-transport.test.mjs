@@ -1512,6 +1512,39 @@ test('writer retirement uses one fixed device route and checks the exact origina
   assert.equal(calls,11,'the transport never retries an attempted write or switches routes');
 });
 
+test('carried answer uses writer retirement with exact coordinates, including on read-back',async()=>{
+  const origin='https://assistant.test',assistantId=randomUUID(),deviceId=randomUUID(),store=memoryStore();
+  await store.put({origin,kind:'device',id:assistantId},{assistantId,deviceId,credential:`tda_${'s'.repeat(43)}`,expiresAt:1});
+  const scope={companyId:randomUUID(),taskId:randomUUID(),passId:randomUUID(),bindingId:randomUUID(),
+    deliveryId:randomUUID(),threadId:randomUUID(),bindingRevision:4,leaseRevision:3};
+  const old={...scope,schemaVersion:1,state:'retired',receiptId:randomUUID(),assistantId,deviceId};
+  const review={workspaceId:randomUUID(),runId:randomUUID(),checkpointId:randomUUID(),draftHead:'a'.repeat(40),
+    dueAt:Date.now(),sourceMarkerId:scope.deliveryId,sourceTurnId:randomUUID(),previousReceiptId:randomUUID()};
+  const previous=randomUUID(),receiptId=randomUUID();
+  const result={schemaVersion:1,state:'read_only_settled',receipt:{...old,state:'read_only_settled',receiptId,
+    acceptedReconciliationReceiptId:previous,writerRetirementReceiptId:old.receiptId,sourceTurnId:review.sourceTurnId}};
+  let value={schemaVersion:1,state:'pending'},status=200,action='read_settlement',calls=0;
+  const client=createAssistantDeviceClient({origin,assistantId,deviceId,store,http:createAssistantHttp({origin,fetchImpl:async(url,options)=>{
+    calls++;
+    assert.equal(url,origin+'/api/digital-assistants/runtime/task-pass/writer-retirement');
+    assert.deepEqual(JSON.parse(options.body),{...scope,action,
+      clientRequestId:old.receiptId,writerRetirementReceiptId:old.receiptId,acceptedReconciliationReceiptId:previous,review});
+    return Response.json(value,{status});
+  }})});
+  const select=observe=>client.settleCarriedAnswer(old,previous,review,observe);
+  assert.deepEqual(await select(true),{state:'pending'});
+  status=400;value={};
+  assert.equal(await select(true),null);
+  status=200;value=result;action='settle_read_only';
+  assert.deepEqual(await select(false),{state:'read_only_settled',receiptId});
+  action='read_settlement';
+  value={...result,receipt:{...result.receipt,acceptedReconciliationReceiptId:randomUUID()}};
+  await assert.rejects(select(true),{code:'ASSISTANT_TRANSPORT_INVALID_RESPONSE'});
+  value=result;
+  assert.deepEqual(await select(true),{state:'read_only_settled',receiptId});
+  assert.equal(calls,5);
+});
+
 test('recovery context selects the original expired or retired pass without inferring an outcome',async()=>{
   const origin='https://assistant.test',assistantId=randomUUID(),deviceId=randomUUID(),store=memoryStore();
   await store.put({origin,kind:'device',id:assistantId},{assistantId,deviceId,credential:`tda_${'s'.repeat(43)}`,expiresAt:1});

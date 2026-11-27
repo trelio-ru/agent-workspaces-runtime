@@ -5651,8 +5651,10 @@ test(`a closed owner-answer writer releases the device while both task outcomes 
   }finally{await coordinator.close();}
 });
 
-for(const interrupt of [false,true])
-test(`the due calendar after a stopped owner answer uses its frozen file and leaves the device available (interrupted=${interrupt})`,async t=>{
+for(const mode of ['carry','interrupted','settled','lost_settlement','unknown_effect'])
+test(`the due calendar after a stopped owner answer uses its frozen file and leaves the device available (${mode})`,async t=>{
+  const interrupt=mode==='interrupted';
+  const settle=['settled','lost_settlement','unknown_effect'].includes(mode);
   const f=fixture(t),inbox=createAssistantInbox({database:f.database,now:f.options.now});
   const client=f.options.client,native=f.options.native,host=f.options.passHost;
   f.authority.workMode='task';
@@ -5761,6 +5763,62 @@ test(`the due calendar after a stopped owner answer uses its frozen file and lea
     const later=coordinator.status()[0].nextRunAt,first=newId;
     assert.ok(later>plan.nextRunAt);f.advance(later-f.options.now());
     expected.dueAt=later;pair.dueAt=later;
+    if(settle){
+      inbox.startRetiredTaskInspection(a.deliveryId,released);
+      const settlementReceipt=randomUUID(),readCheckpoint=native.readDelivery;
+      let persisted=false,reads=0,writes=0;
+      native.readDelivery=(thread,id,options)=>{
+        if(!options.carriedAnswer)return readCheckpoint(thread,id,options);
+        assert.equal(thread,answer.threadId);assert.equal(id,a.deliveryId);
+        assert.equal(options.carriedAnswer.retirementReceiptId,released.receiptId);
+        return mode==='unknown_effect'?{state:'uncertain'}:{state:'carried_answer_read_only',material};
+      };
+      client.settleCarriedAnswer=async(retirement,previous,selector,observe)=>{
+        assert.deepEqual(retirement,released);assert.equal(previous,ownReceipt);assert.deepEqual(selector,expected);
+        if(observe)reads++;
+        else{
+          writes++;persisted=true;
+          if(mode==='lost_settlement')throw Object.assign(new Error('unavailable'),{code:'ASSISTANT_TRANSPORT_UNAVAILABLE'});
+        }
+        return persisted?{state:'read_only_settled',receiptId:settlementReceipt}:{state:'pending'};
+      };
+      if(mode!=='unknown_effect'){
+        if(mode==='lost_settlement'){
+          await assert.rejects(coordinator.workOnce(),{code:'ASSISTANT_TRANSPORT_UNAVAILABLE'});
+          assert.equal(inbox.retiredTaskIds().includes(f.taskId),true);
+        }
+        assert.deepEqual(await coordinator.workOnce(),{state:'retired_settled',kind:'task'});
+        assert.equal(reads,mode==='lost_settlement'?2:1);assert.equal(writes,1);
+        assert.equal(inbox.retiredTaskIds().includes(f.taskId),false);
+        assert.equal(inbox.readDelivery(a.deliveryId).state,'uncertain');
+        assert.equal(inbox.readDelivery(initial.deliveryId).state,'uncertain');
+        assert.equal(f.database.prepare('SELECT processed FROM assistant_inbox_events WHERE event_id=?').get(notificationId).processed,1);
+        assert.equal(coordinator.status()[0].nextRunAt,later);
+        client.beginTaskPass=async input=>{
+          assert.equal(input.retiredScheduled,undefined);assert.equal(input.notificationId,undefined);assert.ok(!prior.has(input.deliveryId));
+          newId=input.deliveryId;return begin(input);
+        };
+        native.run=async(input,options)=>{
+          assert.equal(input.taskContext.scheduled,true);
+          assert.equal(input.taskContext.ownerQuestionIds,undefined);
+          await options.beforeInvocation?.();options.startInvocation();
+          const result={state:'completed',receipt:`codex:${input.threadId}:${randomUUID()}`};
+          f.deliveries.set(input.deliveryId,result);
+          return result;
+        };
+        assert.equal((await coordinator.workOnce()).state,'completed');
+        assert.notEqual(newId,first);
+        assert.equal(inbox.readDelivery(newId).state,'complete');
+        await coordinator.close();
+        return;
+      }
+      assert.equal((await coordinator.workOnce()).state,'completed');
+      assert.equal(reads,1);assert.equal(writes,0);
+      assert.equal(inbox.retiredTaskIds().includes(f.taskId),true);
+      assert.equal(f.database.prepare('SELECT processed FROM assistant_inbox_events WHERE event_id=?').get(notificationId).processed,0);
+      await coordinator.close();
+      return;
+    }
     assert.equal((await coordinator.workOnce()).state,'completed');assert.notEqual(newId,first);
     assert.equal(inbox.readDelivery(first).state,'complete');assert.equal(inbox.readDelivery(newId).state,'complete');
   }

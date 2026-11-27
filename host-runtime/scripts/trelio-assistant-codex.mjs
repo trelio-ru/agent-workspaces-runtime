@@ -2596,6 +2596,53 @@ const readOriginalRetiredTurn=async(request,threadId,
   return {original,failed};
 };
 
+// The carry may have completed several scheduled cycles since the writer
+// stopped. Look up the original and its one inspection in native history,
+// with complete bounded marker coverage. Only those two turns need full items.
+const readCarriedAnswerTurns=async(request,threadId,deliveryId,inspectionId)=>{
+  const markers=[deliveryId,inspectionId].map(value=>assistantDeliveryMarker(value)+'\n');
+  if(deliveryId===inspectionId)return null;
+  const selected=new Map(),seen=new Set(),turnIds=new Set();
+  let cursor=null;
+  for(let index=0;index<12;index++){
+    const query={threadId,limit:5,sortDirection:'desc',...(cursor?{cursor}:{})};
+    const summary=await request('thread/turns/list',{...query,itemsView:'summary'});
+    if(!Array.isArray(summary?.data)||summary.data.length>5)return null;
+    const matches=new Map();
+    for(const turn of summary.data){
+      if(!UUID.test(turn?.id??'')||turnIds.has(turn.id)||!Array.isArray(turn.items))return null;
+      turnIds.add(turn.id);
+      for(const item of turn.items){
+        if(item?.type!=='userMessage')continue;
+        if(!Array.isArray(item.content))return null;
+        for(const input of item.content){
+          const marker=markers.find(value=>input?.type==='text'&&typeof input.text==='string'&&input.text.startsWith(value));
+          if(!marker)continue;
+          if(matches.has(marker)||selected.has(marker))return null;
+          matches.set(marker,turn.id);
+        }
+      }
+    }
+    if(matches.size){
+      const full=await request('thread/turns/list',{...query,itemsView:'full'});
+      if(!Array.isArray(full?.data)||!isDeepStrictEqual(full.data.map(turn=>turn.id),summary.data.map(turn=>turn.id)))return null;
+      for(const [marker,turnId] of matches){
+        const turn=full.data.find(value=>value.id===turnId);
+        const root=turn.items?.[0];
+        if(root?.type!=='userMessage'||root.content?.length!==1||root.content[0]?.type!=='text'
+          ||typeof root.content[0].text!=='string'||!root.content[0].text.startsWith(marker))return null;
+        selected.set(marker,turn);
+      }
+    }
+    if(summary.nextCursor===null)
+      return selected.size===2&&selected.keys().next().value===markers[1]
+        ?{original:selected.get(markers[0]),inspection:selected.get(markers[1])}:null;
+    if(typeof summary.nextCursor!=='string'||!summary.nextCursor||summary.nextCursor.length>1024||seen.has(summary.nextCursor))return null;
+    cursor=summary.nextCursor;seen.add(cursor);
+  }
+  return null;
+};
+
 // Classify the whole previous scheduled pass before admitting a DIFFERENT
 // notification. A fresh answer is not a receipt for any operation in this
 // turn. In particular, an authentication failure qualifies only when the
@@ -3279,6 +3326,11 @@ export const readAssistantCodexDelivery = (threadId, deliveryId, options = {}) =
       const selected=await readOriginalRetiredTurn(request,threadId,options.scheduledCheckpoint);
       const material=selected&&assistantRetiredCheckpointMaterial(selected.original,deliveryId,options.scheduledCheckpoint);
       return material?{state:'checkpoint_observed',material}:{state:'uncertain'};
+    }
+    if(options.carriedAnswer!==undefined){
+      const selected=await readCarriedAnswerTurns(request,threadId,deliveryId,options.carriedAnswer.retirementReceiptId);
+      const material=selected&&assistantCarriedAnswerReadOnly(selected,deliveryId,options.carriedAnswer);
+      return material?{state:'carried_answer_read_only',material}:{state:'uncertain'};
     }
     if(options.retiredOwnerQuestion!==undefined)
       return readRetiredOwnerQuestion(request,threadId,deliveryId,options.retiredOwnerQuestion);
@@ -4709,4 +4761,58 @@ export const assistantRetiredCheckpointMaterial = (turn, deliveryId, {
     }
   }
   return checkpoint ? { sourceTurnId: turn.id, ...checkpoint, path, beforeSha256, afterSha256 } : null;
+};
+
+/** The checkpoint verifier establishes the exact carried WORK change. This
+ * additional classification closes every other executable item before the
+ * coordinator may release the task fence. Browser actions are limited to
+ * an observed closed visit and the actual screenshot framing refusal. */
+export const assistantCarriedAnswerReadOnly=({original,inspection},deliveryId,options)=>{
+  const material=assistantRetiredCheckpointMaterial(original,deliveryId,options);
+  if(!material||inspection?.status!=='completed'||inspection.error!=null||!Array.isArray(inspection.items)
+    ||inspection.items.length>128)return null;
+  const {taskPass}=options;
+  const passive=item=>['reasoning','agentMessage','sleep'].includes(item?.type)||completedTaskContextCompaction(item);
+  const trusted=item=>item?.type==='mcpToolCall'&&item.server==='trelio-assistant'&&plainRecord(item.arguments)
+    &&exactDraftPass(item.arguments.taskPass,taskPass);
+  const completed=item=>item.status==='completed'&&item.error==null&&item.result?.isError!==true;
+  for(const item of inspection.items.slice(1)){
+    if(!passive(item)&&(!trusted(item)||!completed(item)||!ASSISTANT_RETIRED_TASK_READ_TOOLS.includes(item.tool)))return null;
+  }
+  const visit={origin:null,closed:true,pending:false};
+  for(const item of original.items.slice(1)){
+    if(passive(item))continue;
+    const args=item.arguments,result=item.result?.structuredContent,success=completed(item);
+    if(item.tool==='get_assistant_status'&&success&&args.taskPass===undefined&&onlyKeys(args,['view']))continue;
+    if(!trusted(item))return null;
+    if(recoveredOutcomeReads.has(item.tool)&&success)continue;
+    if(item.tool==='prepare_assistant_workspace_run'&&success)continue;
+    if(item.tool==='use_assistant_workspace_files'&&success&&['list','read','replace'].includes(args.command?.action))continue;
+    if(item.tool==='continue_assistant_workspace_action'){
+      if(['open','checkpoint'].includes(args.operation)&&success)continue;
+      if(args.operation==='status'&&(success||localDraftRefusal(item,'TRELIO_RUNTIME_HOOK_FAILED')))continue;
+      if(args.operation==='skill_run'&&success&&!Object.hasOwn(result??{},'taskSkillArtifact')){
+        const witnessed=recoveredOutcomeSkillRead(args,result,taskPass);
+        if(witnessed===true||witnessed?.releaseId==='10537164-64a7-4224-99e6-b1dd6b743091')continue;
+      }
+    }
+    if(item.tool!=='use_assistant_browser')return null;
+    if(!success){
+      if(args.command?.operation==='screenshot'&&plainRecord(args.command.args)&&!Object.keys(args.command.args).length
+        &&!visit.closed&&args.siteOrigin===visit.origin
+        &&localDraftRefusal(item,'ASSISTANT_RUNTIME_REQUEST_INVALID_VALUE_FRAME'))continue;
+      return null;
+    }
+    const content=item.result?.content;
+    if(!Array.isArray(content)||content[0]?.type!=='text'||typeof content[0].text!=='string'
+      ||Buffer.byteLength(content[0].text)>32_768||content.length>2||content.length===2&&content[1]?.type!=='image')return null;
+    let visual;try{visual=JSON.parse(content[0].text);}catch{return null;}
+    // Historical recovery accepts the Google Chat landing page only.
+    // A generic same-origin GET could open a discussion or change session state.
+    if(args.command?.operation==='navigate'
+      &&args.command.args?.url!=='https://mail.google.com/mail/u/0/#chat/home')return null;
+    if(args.command?.operation==='screenshot'&&visual?.state==='ready'&&visual.reason==='none')visit.pending=false;
+    if(!observeClosedBrowserVisit(visit,args,visual))return null;
+  }
+  return visit.closed&&!visit.pending?material:null;
 };

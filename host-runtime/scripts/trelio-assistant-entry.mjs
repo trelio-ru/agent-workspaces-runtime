@@ -2153,6 +2153,12 @@ export const createAssistantRuntimeHost = async ({ context=productionContext, de
       signal?.throwIfAborted();
       return live.retireTaskWriter(scope,signal);
     })),
+    settleCarriedAnswer:(retirement,previousReceiptId,review,observe,signal)=>invoke((live,host)=>host.withSetupLock(async()=>{
+      signal.throwIfAborted();
+      if(await host.readActivePass()!==null)fail('ASSISTANT_PASS_REVIEW_REQUIRED');
+      signal.throwIfAborted();
+      return live.settleCarriedAnswer(retirement,previousReceiptId,review,observe,signal);
+    })),
     readTaskRecoveryContext:(...args)=>invoke(live=>live.readTaskRecoveryContext?.(...args)??null),
     readTaskRetiredOutcomeEvidence:(...args)=>invoke(live=>live.readTaskRetiredOutcomeEvidence?.(...args)??null),
     ...Object.fromEntries(coordinatorMethods.map(name=>[name,(...args)=>invoke(live=>live[name](...args),

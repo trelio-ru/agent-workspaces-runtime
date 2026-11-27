@@ -48,6 +48,9 @@ publication tooling также остаются вне этого публичн
 - Human encrypted-device setup follows [browser self-enrollment](docs/agent-workspace-runtime.md#self-device-enrollment): personal phrases stay in Trelio, own-device confirmation and bounded readiness reads; managed/existing-only profiles never open that flow.
 
 - Очередь цифрового ассистента – [контракт](docs/assistant-inbox.md).
+  The carry of a stopped owner answer cannot settle unknown external effects.
+  Release its calendar fence only after complete native read-only evidence and
+  the exact accepted successor receipt. Keep both old deliveries in history.
   Source attention gates intake before models: email INBOX all new; Telegram/MAX
   private incoming or native mention/direct reply. Ordinary group history stays
   at provider; scheduled review uses accepted per-task WORK.md bookmarks, not
