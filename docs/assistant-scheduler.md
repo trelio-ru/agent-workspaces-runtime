@@ -3898,9 +3898,11 @@ child HOME and requires an explicit end-of-flow sentinel. It removes inherited
 ### Slow Workspace open
 
 An own-Run checkout of a large encrypted archive can outlast the 45-second
-assistant MCP request. After native open admission, the existing stdio
-coordinator owns one signed child. It responds within a short wait; each
-returned status call repeats native admission and matches the original
+assistant MCP request. The short private admission session closes before the
+existing stdio coordinator starts its one signed child. Its later registry
+read uses the ordinary private path verification after the child's exit.
+The coordinator responds within a short wait. Each returned status call
+repeats native admission and matches the original
 assistant/device/task/pass/Workspace/Run and opaque operation handle. The
 native status wire field `finishOperationId` is shared for compatibility.
 A running receipt contains no local authority reads. Only a verified opened

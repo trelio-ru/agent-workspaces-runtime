@@ -214,6 +214,9 @@ publication tooling также остаются вне этого публичн
   read calls with the verified Run locators. Each call keeps independent native
   admission and local lease validation. The suggested reads carry no absolute
   filesystem path, proof or write authority.
+  Start an admitted open after the short private admission session closes.
+  The one signed opener and its exact local registry read can outlive that
+  session; polling retains a fresh native admission and the original handle.
 - The initial task catalogue includes the native exact accepted-file reader
   for an independently authorized Workspace/head/path. It works before a Run
   and uses the same company-read transport and ACL.

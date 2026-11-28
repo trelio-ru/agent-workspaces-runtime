@@ -1222,6 +1222,73 @@ test('a slow own-Run opening survives a short caller wait, with one child and fr
   assert.equal(launches,1);
 });
 
+test('stdio completes a slow Workspace open after the original native admission closes',async t=>{
+  const {runtimeHookSignal,assertRuntimeHookBudget}=await import('../host-runtime/scripts/trelio-hook-private-session.mjs');
+  const root=await fs.mkdtemp(path.join(os.tmpdir(),'assistant-stdio-open-'));
+  await fs.mkdir(path.join(root,'digital-assistants'),{recursive:true});
+  await fs.writeFile(path.join(root,'digital-assistants','identity.json'),'{}');
+  const plan=workspacePlan();
+  const admissions=[];
+  const realTimeout=AbortSignal.timeout;
+  t.mock.method(AbortSignal,'timeout',milliseconds=>{
+    if(milliseconds!==45_000)return realTimeout(milliseconds);
+    const admission=new AbortController();
+    admissions.push(admission);
+    return admission.signal;
+  });
+  let release,launches=0,requests=0;
+  const materialization=new Promise(resolve=>{release=resolve;});
+  const workspace=await createAssistantWorkspaceExecutor({configDirectory:root,finishOptions:{waitMs:5},
+    runPlan:async raw=>{
+      launches++;
+      assert.deepEqual(raw,plan);
+      await materialization;
+      // The signed child's completed result still needs a private registry
+      // read in its parent. Exercise the actual private-session guard on all
+      // platforms, including those where a metadata read needs no ACL worker.
+      assertRuntimeHookBudget();
+      assert.equal(runtimeHookSignal(),undefined);
+      return {schemaVersion:1,operation:'open',stdout:'materialized exact Run'};
+    }});
+  const input=new PassThrough(),responses=new Map();
+  const done=runAssistantSetupMcp({input,output:{write:line=>{
+    const response=JSON.parse(line);
+    responses.get(response.id)?.(response);
+  }},createWorkspace:async()=>workspace,preservePlugin:()=>null,
+    createMcp:options=>createForwardingAssistantMcp({...options,configurationDirectory:root,request:async(raw,{signal})=>{
+      assert.equal(raw.name,'continue_assistant_workspace_action');
+      assert.equal(runtimeHookSignal(),signal);
+      assert.equal(signal,admissions[requests++].signal);
+      const action=raw.arguments.operation==='open'?plan.localAction:raw.arguments;
+      return {content:[],structuredContent:{...plan,localAction:action}};
+    }})});
+  t.after(async()=>{release();input.end();await done;await fs.rm(root,{recursive:true,force:true});});
+  const send=(id,method,params)=>new Promise(resolve=>{
+    responses.set(id,resolve);
+    input.write(JSON.stringify({jsonrpc:'2.0',id,method,params})+'\n');
+  });
+  const call=(id,args)=>send(id,'tools/call',{name:'continue_assistant_workspace_action',arguments:args});
+  await send(1,'initialize');
+  const first=await call(2,plan.localAction);
+  const pending=first.result.structuredContent;
+  assert.equal(pending.state,'running');
+  assert.equal(pending.authorityReads,undefined);
+  admissions[0].abort(new Error('original native admission expired'));
+  release();
+  let opened=pending, polls=0;
+  const deadline=performance.now()+2000;
+  while(opened.state==='running'&&performance.now()<deadline){
+    const response=await call(3+polls++,pending.nextCall.arguments);
+    assert.equal(response.result.isError,undefined,JSON.stringify(response.result));
+    opened=response.result.structuredContent;
+  }
+  assert.equal(opened.state,'completed');
+  assert.equal(opened.operationId,pending.operationId);
+  assert.equal(opened.authorityReads.length,2);
+  assert.equal(launches,1);
+  assert.equal(requests,1+polls,'every status poll rechecks native admission');
+});
+
 for(const operation of ['skill_run','inspect'])test(`stdio closes native ${operation} admission before its one isolated child`,async t=>{
   const {runtimeHookSignal}=await import('../host-runtime/scripts/trelio-hook-private-session.mjs');
   const {runWorkspaceFinishProcess}=await import('../host-runtime/scripts/trelio-workspace-finish-progress.mjs');

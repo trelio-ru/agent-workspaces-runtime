@@ -1555,13 +1555,16 @@ export const createForwardingAssistantMcp = async ({presentationProfile='task',r
           :executed?.operation==='skill_run'&&executed.instruction?executed.instruction
           :'Assistant Workspace action completed or remains in progress; inspect structuredContent.'}],structuredContent:executed};
       };
-      if(separateWorkspaceExecution&&(args.operation==='skill_run'||args.operation==='inspect'&&result.structuredContent?.encryptedInspection)){
+      if(separateWorkspaceExecution&&(args.operation==='open'||args.operation==='skill_run'
+        ||args.operation==='inspect'&&result.structuredContent?.encryptedInspection)){
         const plan=await validateAssistantWorkspacePlan(result.structuredContent);
         if(plan.localAction.operation!==args.operation)fail('ASSISTANT_WORKSPACE_PLAN_INVALID');
         signal?.throwIfAborted();
-        // The exact accepted archive can take longer to download/decrypt than
-        // to authorize. Reuse the bounded signed-child lifetime after native
-        // admission, just as for a skill. The child repeats the live checks.
+        // An open may return a short-wait handle while its signed child is
+        // still materializing. The parent's exact registry read after the
+        // child exits must not inherit the closed admission ACL session.
+        // Release that session before starting; the child and every poll
+        // still repeat their existing live checks.
         return {[admittedWorkspaceExecution]:executionSignal=>executeWorkspace(assistantWorkspaceExecutionPlan(plan),executionSignal)};
       }
       return executeWorkspace(result.structuredContent,signal);
@@ -1678,8 +1681,9 @@ export const runAssistantSetupMcp = async ({ input = process.stdin, output = pro
             return proxy.callTool(message.params.name, message.params.arguments, signal,{separateWorkspaceExecution:true});
           },{interactiveSourceSetup:interactiveAssistantTool(message.params.name),callProfile});
           // The native request and its private process session are closed.
-          // Execute once under the signed child lifetime; serial stdio keeps
-          // the result in this same call without a new schema or replay path.
+          // Start the admitted execution once. A Workspace open can return its
+          // existing short-wait handle; serial stdio keeps each individual
+          // call and response paired without a new schema or replay path.
           const result=typeof admitted?.[admittedWorkspaceExecution]==='function'
             ?await admitted[admittedWorkspaceExecution](AbortSignal.any([controller.signal,AbortSignal.timeout(taskSkillExecutionTimeoutMs)]))
             :admitted;
