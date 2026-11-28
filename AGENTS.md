@@ -2036,6 +2036,10 @@ Exact legacy template bytes для распознавания при мигра�
   first proof open across real recovery and preserve Task Scheduler starts,
   failure receipts, exact counts and stale-snapshot assertions.
 - Assistant Remote MCP reuses the SAME resolver/forms/vault/doctor/call with a managed namespace, native-selected encrypted config and one-use owner attempt fence. Presentation views never grant authority; see [contract](docs/assistant-scheduler.md#managed-remote-mcp-profile).
+  Interactive [first-use OAuth](docs/agent-skills-and-secrets.md#первый-вход-remote-mcp-oauth)
+  offers the exact connection continuation only for a missing binding. The
+  human grants provider consent. Persist an explicit no-access decision
+  locally for that connection and block automatic prompts until explicit retry.
   Remote MCP v4 binds a registered public OAuth client ID to the same issuer,
   resource and protected PKCE flow. A reviewed read-only allowlist remains the
   entire callable set even when the provider account exposes writes.

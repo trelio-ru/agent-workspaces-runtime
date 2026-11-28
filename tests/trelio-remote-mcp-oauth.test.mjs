@@ -15,7 +15,7 @@ import {
   oauthHttpJson,
   refreshRemoteMcpOAuth,
 } from "../host-runtime/scripts/trelio-remote-mcp-oauth.mjs";
-import { loadPersonalCredential, forgetPersonalCredential, createHarnessConnection } from "../host-runtime/scripts/trelio-remote-mcp.mjs";
+import { loadPersonalCredential, forgetPersonalCredential, createHarnessConnection, executeRemoteMcpTool, RemoteMcpHostError } from "../host-runtime/scripts/trelio-remote-mcp.mjs";
 import { BrowserOpenError, withWorkspaceExecutionProfile, writePrivateJsonFile, readPrivateJsonFile } from "../host-runtime/scripts/trelio-workspace.mjs";
 import { createRemoteMcpOAuthVault } from "../host-runtime/scripts/trelio-remote-mcp-oauth-vault.mjs";
 
@@ -584,6 +584,82 @@ const deferred = () => { let resolve; const promise = new Promise(done => { reso
 // These codec tests use an in-memory OS vault. Cross-process locking and native
 // private I/O are exercised separately below in a disposable real directory.
 const withSyntheticCredentialState = async (_root, operation) => operation();
+
+test("interactive OAuth first use exposes one exact continuation and honors a persisted user refusal", async (t) => {
+  const directory = await realpath(await mkdtemp(path.join(os.tmpdir(), "trelio-oauth-preference-")));
+  const previousHome = process.env.TRELIO_CONFIG_HOME;
+  process.env.TRELIO_CONFIG_HOME = directory;
+  t.after(async () => {
+    if (previousHome === undefined) delete process.env.TRELIO_CONFIG_HOME;
+    else process.env.TRELIO_CONFIG_HOME = previousHome;
+    await rm(directory, { recursive: true, force: true });
+  });
+
+  const { declaration, createVault, managedProfile } = refreshFixture();
+  const origin = "https://trelio.ru";
+  const { companyId, memberId, skillId } = declaration.localIdentity;
+  const args = { companyId, projectId: null, skillId, releaseId: "11111111-1111-4111-8111-111111111111" };
+  const connect = "connect_remote_agent_skill";
+  const doctor = "doctor_remote_agent_skill";
+  let openings = 0;
+  const dependencies = {
+    resolveDeclaration: async (_origin, input) => ({ ...declaration, skill: { id: skillId },
+      localIdentity: { companyId: input.companyId, projectId: input.projectId, memberId, skillId },
+      releaseId: input.releaseId }),
+    loadCredential: (requestOrigin, exact, options) => loadPersonalCredential(requestOrigin, exact, { ...options,
+      createOAuthVault: createVault, withCredentialState: withSyntheticCredentialState }),
+    authorizeOAuth: async () => {
+      openings++;
+      throw new Error("Synthetic browser handoff");
+    },
+  };
+  const run = (name, input = args, deps = dependencies) => executeRemoteMcpTool(origin, name, input, deps);
+
+  let firstUse;
+  await assert.rejects(run(doctor), error => {
+    firstUse = error.details?.oauthSetup;
+    assert.equal(error.code, "REMOTE_MCP_OAUTH_RECONNECT_REQUIRED");
+    assert.equal(firstUse.state, "required");
+    assert.deepEqual(firstUse.nextCall, { server: "trelio-remote-skills", tool: connect, arguments: args });
+    return true;
+  });
+  assert.equal(openings, 0, "a doctor is always read-only");
+  await assert.rejects(run(firstUse.nextCall.tool, firstUse.nextCall.arguments), /Synthetic browser handoff/u);
+  assert.equal(openings, 1);
+
+  const { tool, arguments: decision } = firstUse.recordNoAccess;
+  const recorded = await run(tool, decision);
+  assert.equal(JSON.parse(recorded.content[0].text).oauthSetup.state, "no_access");
+
+  const nextRelease = { ...args, releaseId: "22222222-2222-4222-8222-222222222222" };
+  let retry;
+  const expectSuppressed = error => {
+    assert.equal(error.code, "REMOTE_MCP_OAUTH_RECONNECT_REQUIRED");
+    const setup = error.details.oauthSetup;
+    assert.equal(setup.state, "no_access");
+    assert.equal(setup.nextCall, undefined);
+    retry = setup.retry;
+    return true;
+  };
+  await assert.rejects(run(doctor, nextRelease), expectSuppressed);
+  await assert.rejects(run("call_remote_agent_skill_tool", { ...nextRelease, toolName: "search", arguments: {} }), expectSuppressed);
+  await assert.rejects(run(connect, nextRelease), expectSuppressed);
+  assert.equal(openings, 1, "later calls must not open the browser");
+  assert.deepEqual(retry.arguments, { ...nextRelease, oauthSetupDecision: "retry" });
+
+  await assert.rejects(run(doctor, { ...args, companyId: "33333333-3333-4333-8333-333333333333" }),
+    error => error.details.oauthSetup.state === "required");
+  const profile = managedProfile("assistant:synthetic:device");
+  await assert.rejects(withWorkspaceExecutionProfile(profile, () => run(doctor)),
+    error => error.code === "REMOTE_MCP_OAUTH_RECONNECT_REQUIRED" && error.details === null);
+  await assert.rejects(withWorkspaceExecutionProfile(profile, () => run(connect, decision)),
+    { code: "REMOTE_MCP_INVALID_INPUT" });
+  await assert.rejects(run(doctor, args, { ...dependencies, loadCredential: async () => {
+    throw new RemoteMcpHostError("REMOTE_MCP_OAUTH_RECONNECT_REQUIRED", "Synthetic uncertain refresh");
+  } }), error => error.details === null);
+  await assert.rejects(run(retry.tool, retry.arguments), /Synthetic browser handoff/u);
+  assert.equal(openings, 2);
+});
 
 for (const variation of ["company", "skill", "managed namespace"]) {
   test("OAuth refresh never shares tokens across " + variation, async () => {

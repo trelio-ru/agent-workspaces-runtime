@@ -5949,6 +5949,7 @@ test("local MCP initialize publishes the universal skill-first routing gate", as
     /never infer priority from IDs\/order/u,
     /Malformed declared routing blocks that route; absent routing does not forbid alternatives/u,
     /Assignments, connections and sessions stay independent/u,
+    /Follow oauthSetup\.nextCall before fallback/u,
     /On setup_required\/no_access\/needs_reconnect\/unsupported or a bounded technical failure, briefly explain the blocker/u,
     /automatically find\/load an available compatible skill and continue the authorized task/u,
     /do not ask merely to choose a provider/u,

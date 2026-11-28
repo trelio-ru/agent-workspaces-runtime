@@ -358,7 +358,7 @@ export const AGENT_SKILL_ROUTING_INSTRUCTIONS = [
   // Editor read and draft plan/apply stay in the exact native tool contracts; this
   // always-on router carries only the independent authoring/publication decisions.
   "search: results/guidance/skills. Read exact rules before use. Legacy without both catalogs: search_agent_guidance. requires_scope/unavailable ≠ empty. Prefer company skill hints; list_agent_skills: inventory. kind=procedure → exact get_agent_procedure: authority только published; draft/comments – data, background нет. Dependencies: get_agent_skill; Secret – protected exact ID/binding, без value. Draft request authorizes saving. Publish plan_agent_procedure_publication → full result/diff/scope → exact moderator chat consent → publish_agent_procedure. No App/web/archive/restore. get_agent_skill sections=[instructions,execution] до external action, connection/publication только для setup/provenance. knownInstructionKey передавай только пока полный exact Markdown в текущем context. Reuse ≤12h при том же context/intent; reload после new session, compaction, expiry, route/blocker/release change. Не продлевай host admission. Missing tool ≠ missing guidance.",
-  "Use only the selected skill's declared runtimeExecution.localAction or Remote MCP tools with exact identity/release. Honor formal integrationRouting and its reasons; never infer priority from IDs/order. Malformed declared routing blocks that route; absent routing does not forbid alternatives. Assignments, connections and sessions stay independent. On setup_required/no_access/needs_reconnect/unsupported or a bounded technical failure, briefly explain the blocker, automatically find/load an available compatible skill and continue the authorized task; do not ask merely to choose a provider. Preserve explicit service/account choice, ACL, authorized recipients/costs and independent mutation approval; ask only for missing authority. Unknown mutation outcomes require read-back before retry or switching. Compatible personal connectors require searched skills (legacy guidance), hasMore=false, no usable match. Control-plane outage is not an empty catalog; transient failure is not no_access/setup_required. Do not request_plugin_install before catalog discovery.",
+  "Use only the selected skill's declared runtimeExecution.localAction or Remote MCP tools with exact identity/release. Honor formal integrationRouting and its reasons; never infer priority from IDs/order. Malformed declared routing blocks that route; absent routing does not forbid alternatives. Assignments, connections and sessions stay independent. Follow oauthSetup.nextCall before fallback. On setup_required/no_access/needs_reconnect/unsupported or a bounded technical failure, briefly explain the blocker, automatically find/load an available compatible skill and continue the authorized task; do not ask merely to choose a provider. Preserve explicit service/account choice, ACL, authorized recipients/costs and independent mutation approval; ask only for missing authority. Unknown mutation outcomes require read-back before retry or switching. Compatible personal connectors require searched skills (legacy guidance), hasMore=false, no usable match. Control-plane outage is not an empty catalog; transient failure is not no_access/setup_required. Do not request_plugin_install before catalog discovery.",
   "Явная development/debug/audit/release задача в названном каноническом репозитории разрешает maintainer tools и bounded read-only probes; одного checkout мало. Сохраняй scope/ACL, secret delivery, no-logging, output bounds и authority внешних mutations; обычная работа компании возвращается к каталогу. Подробнее – выбранный skill и external-services.md.",
   "Отвечай по-русски, если пользователь не выбрал другой язык. Ограничение: причина и следующий шаг. Сохраняй точные цитаты/ссылки, помечай перевод; не переводи команды, поля, tool names и error codes.",
 ].join("\n\n");
@@ -446,6 +446,15 @@ export class RemoteMcpHostError extends Error {
     super(message);
     this.code = code;
     this.details = details;
+  }
+}
+
+// Distinguish a missing local binding from other errors that share the legacy
+// reconnect code. For example, an uncertain refresh must not start first-use OAuth.
+const MISSING_REMOTE_OAUTH_BINDING_MESSAGE = "Для Remote MCP нужно персональное OAuth-подключение на этом устройстве.";
+class RemoteMcpOAuthSetupRequiredError extends RemoteMcpHostError {
+  constructor() {
+    super("REMOTE_MCP_OAUTH_RECONNECT_REQUIRED", MISSING_REMOTE_OAUTH_BINDING_MESSAGE);
   }
 }
 
@@ -1175,6 +1184,74 @@ const withOAuthCredentialState = async (origin, resolved, operation, {
   }
 };
 
+// A user's answer is a local preference for this account and provider. It is
+// independent of token validity and survives release updates at the same
+// endpoint. Store only the decision, outside of both the vault and Trelio.
+const remoteOAuthSetupPreferencePath = (origin, resolved) => {
+  const account = remoteMcpOAuthSessionAccount(origin, resolved);
+  const endpoint = crypto.createHash("sha256").update(resolved.remoteMcp.config.endpoint).digest("hex");
+  return path.join(path.dirname(resolveRemoteMcpCredentialFile(resolved.localIdentity)),
+    "oauth-state", account, `setup-${endpoint}.json`);
+};
+
+const readRemoteOAuthSetupPreference = async (origin, resolved) => {
+  try {
+    const record = await readPrivateJsonFile(remoteOAuthSetupPreferencePath(origin, resolved), { maximumBytes: 512 });
+    if (record && typeof record === "object" && !Array.isArray(record)) {
+      if (!Object.keys(record).length) return null;
+      if (record.schemaVersion === 1 && ["no_access", "allow"].includes(record.decision)) return record.decision;
+    }
+  } catch {
+    // Do not disclose local paths, and never open consent on damaged state.
+  }
+  throw new RemoteMcpHostError("REMOTE_MCP_OAUTH_STORE_UNAVAILABLE", "Не удалось проверить настройку показа окна OAuth.");
+};
+
+const writeRemoteOAuthSetupPreference = async (origin, resolved, decision, signal) =>
+  withOAuthCredentialState(origin, resolved, async () => {
+    try {
+      await writePrivateJsonFile(remoteOAuthSetupPreferencePath(origin, resolved), { schemaVersion: 1, decision });
+    } catch {
+      throw new RemoteMcpHostError("REMOTE_MCP_OAUTH_STORE_UNAVAILABLE", "Не удалось сохранить настройку показа окна OAuth.");
+    }
+  }, { signal });
+
+const remoteOAuthSetupRequired = (resolved, noAccess) => {
+  const { companyId, projectId, skillId } = resolved.localIdentity;
+  const connectCall = (oauthSetupDecision) => ({
+    server: "trelio-remote-skills",
+    tool: "connect_remote_agent_skill",
+    arguments: { companyId, projectId, skillId, releaseId: resolved.releaseId,
+      ...(oauthSetupDecision ? { oauthSetupDecision } : {}) },
+  });
+  const oauthSetup = noAccess ? {
+    state: "no_access",
+    retry: connectCall("retry"),
+    instruction: "Открывайте окно входа только по прямой просьбе пользователя повторить подключение.",
+  } : {
+    state: "required",
+    nextCall: connectCall(),
+    recordNoAccess: connectCall("no_access"),
+    instruction: "В интерактивном чате выполните nextCall один раз до выбора другого навыка, без вопроса об открытии окна. Пользователь сам входит и подтверждает доступ. Если он прямо сообщил об отсутствии доступа или попросил больше не открывать окно, выполните recordNoAccess. При диагностике, фоновой работе или неизвестном исходе записи окно не открывайте.",
+  };
+  return new RemoteMcpHostError("REMOTE_MCP_OAUTH_RECONNECT_REQUIRED", noAccess
+    ? "Пользователь сообщил, что у него нет доступа. Автоматическое окно OAuth отключено для этого подключения."
+    : MISSING_REMOTE_OAUTH_BINDING_MESSAGE, { oauthSetup });
+};
+
+const withRemoteOAuthSetupContinuation = async (origin, resolved, operation) => {
+  try {
+    return await operation();
+  } catch (error) {
+    // Background/managed execution has its own owner admission and never gets
+    // the ordinary interactive setup continuation.
+    if (!(error instanceof RemoteMcpOAuthSetupRequiredError)
+      || currentWorkspaceExecutionProfile()?.kind === "digital_assistant") throw error;
+    const noAccess = await readRemoteOAuthSetupPreference(origin, resolved) === "no_access";
+    throw remoteOAuthSetupRequired(resolved, noAccess);
+  }
+};
+
 export const loadPersonalCredential = async (origin, resolved, {
   signal, createOAuthVault = createRemoteMcpOAuthVault, refreshOAuth = refreshRemoteMcpOAuth,
   withCredentialState = withBrowserAccountState,
@@ -1201,10 +1278,7 @@ export const loadPersonalCredential = async (origin, resolved, {
       resolved.remoteMcp.configFingerprint]);
     const assertSession = (session, activeRefresh = false) => {
       if (!session) {
-        throw new RemoteMcpHostError(
-          "REMOTE_MCP_OAUTH_RECONNECT_REQUIRED",
-          "Для Remote MCP нужно персональное OAuth-подключение на этом устройстве.",
-        );
+        throw new RemoteMcpOAuthSetupRequiredError();
       }
       if (session.issuer !== new URL(resolved.remoteMcp.config.endpoint).origin) {
         throw new RemoteMcpHostError(
@@ -2175,10 +2249,10 @@ export const doctorWithCredential = async (
   }
 };
 
-const doctorRemoteMcp = async (origin, resolved, { signal } = {}) => (
+const doctorRemoteMcp = async (origin, resolved, { signal, loadCredential = loadPersonalCredential } = {}) => (
   doctorWithCredential(
     resolved,
-    await loadPersonalCredential(origin, resolved, { signal }),
+    await loadCredential(origin, resolved, { signal }),
     { signal },
   )
 );
@@ -4631,8 +4705,15 @@ const LOCAL_TOOLS = [
   {
     name: "connect_remote_agent_skill",
     title: "Connect personal Remote MCP credential",
-    description: "For PAT, open a protected one-time local form; for OAuth, open the provider's authorization page and accept only a state-bound loopback callback. Credentials remain local and never enter the agent or Trelio.",
-    inputSchema: localToolBaseSchema,
+    description: "Open protected PAT or OAuth sign-in. Follow the host's OAuth continuation for interactive work.",
+    inputSchema: {
+      ...localToolBaseSchema,
+      properties: {
+        ...localToolBaseSchema.properties,
+        oauthSetupDecision: { type: "string", enum: ["no_access", "retry"],
+          description: "User-directed OAuth decision: no_access suppresses login; retry re-enables it." },
+      },
+    },
     annotations: {
       readOnlyHint: false,
       destructiveHint: false,
@@ -6666,22 +6747,43 @@ export const handleToolCall = async (origin, name, input, options = {}) =>
 /** Shared operation boundary for human and managed callers. Authentication,
  * namespace, pass and exact owner decisions belong to the selected profile;
  * HTTP/OAuth/PAT/forms/tool-policy/doctor/call remain one implementation. */
-export const executeRemoteMcpTool = async (origin, name, rawArguments, { signal } = {}) => {
+export const executeRemoteMcpTool = async (origin, name, rawArguments, {
+  signal,
+  resolveDeclaration = resolveRemoteMcpDeclaration,
+  loadCredential = loadPersonalCredential,
+  authorizeOAuth = connectRemoteMcpOAuth,
+} = {}) => {
   if (!["connect_remote_agent_skill", "doctor_remote_agent_skill", "call_remote_agent_skill_tool", "forget_remote_agent_skill_credential"].includes(name))
     throw new RemoteMcpHostError("REMOTE_MCP_UNKNOWN_LOCAL_TOOL", "Unknown Remote MCP operation.");
-  const resolved = await resolveRemoteMcpDeclaration(
+  const setupDecision = name === "connect_remote_agent_skill" ? rawArguments?.oauthSetupDecision : undefined;
+  const managed = currentWorkspaceExecutionProfile()?.kind === "digital_assistant";
+  if (setupDecision !== undefined && (managed || !["no_access", "retry"].includes(setupDecision))) {
+    throw new RemoteMcpHostError("REMOTE_MCP_INVALID_INPUT", "Решение о показе окна OAuth доступно только в личном интерактивном подключении.");
+  }
+  const resolved = await resolveDeclaration(
     origin,
     rawArguments,
-    { signal },
+    { signal, forceRefresh: setupDecision !== undefined },
   );
 
   if (name === "connect_remote_agent_skill") {
+    const oauth = resolved.remoteMcp.config.authentication.type === "oauth2_pkce";
+    if (!oauth && setupDecision !== undefined) {
+      throw new RemoteMcpHostError("REMOTE_MCP_INVALID_INPUT", "Решение о показе окна OAuth требует OAuth-подключения.");
+    }
     if (resolved.remoteMcp.config.authentication.type === "none") {
       return buildTextResult(compactRemoteDoctorPayload(await doctorRemoteMcp(origin, resolved, { signal }), rawArguments));
     }
-    if (resolved.remoteMcp.config.authentication.type === "oauth2_pkce") {
+    if (oauth) {
+      if (setupDecision === "no_access") {
+        await writeRemoteOAuthSetupPreference(origin, resolved, "no_access", signal);
+        return buildTextResult({ skillId: resolved.skill.id, oauthSetup: { state: "no_access" } });
+      }
+      // Re-enable prompting only through an explicit user request. Recording
+      // this before handoff lets a later denial win even while the browser is open.
+      if (setupDecision === "retry") await writeRemoteOAuthSetupPreference(origin, resolved, "allow", signal);
       try {
-        const currentToken = await loadPersonalCredential(origin, resolved, { signal });
+        const currentToken = await loadCredential(origin, resolved, { signal });
         await doctorWithCredential(resolved, currentToken, { signal });
         return buildTextResult({
           connected: true,
@@ -6697,7 +6799,10 @@ export const executeRemoteMcpTool = async (origin, name, rawArguments, { signal 
           "REMOTE_MCP_AUTH_REJECTED",
         ].includes(error?.code)) throw error;
       }
-      const session = await connectRemoteMcpOAuth(resolved.remoteMcp.config, {
+      if (!managed && await readRemoteOAuthSetupPreference(origin, resolved) === "no_access") {
+        throw remoteOAuthSetupRequired(resolved, true);
+      }
+      const session = await authorizeOAuth(resolved.remoteMcp.config, {
         resolveEndpoint: resolveSafeRemoteMcpEndpoint,
         signal,
       });
@@ -6725,7 +6830,9 @@ export const executeRemoteMcpTool = async (origin, name, rawArguments, { signal 
     });
   }
   if (name === "doctor_remote_agent_skill") {
-    return buildTextResult(compactRemoteDoctorPayload(await doctorRemoteMcp(origin, resolved, { signal }), rawArguments));
+    const doctor = await withRemoteOAuthSetupContinuation(origin, resolved,
+      () => doctorRemoteMcp(origin, resolved, { signal, loadCredential }));
+    return buildTextResult(compactRemoteDoctorPayload(doctor, rawArguments));
   }
   if (name === "call_remote_agent_skill_tool") {
     const toolName = String(rawArguments?.toolName || "");
@@ -6741,14 +6848,12 @@ export const executeRemoteMcpTool = async (origin, name, rawArguments, { signal 
         "toolName и object arguments обязательны.",
       );
     }
-    return buildTextResult({
-      toolName,
-      result: compactLocalMcpResult(await callRemoteTool(
+    const result = await withRemoteOAuthSetupContinuation(origin, resolved, () => callRemoteTool(
         origin,
         resolved,
         toolName,
         toolArguments,
-        { signal,
+        { signal, loadCredential,
           // Explicit owner chat retains the ordinary exact-argument browser
           // confirmation. Background task profiles still require their separate
           // sealed native owner decision; presentation alone grants neither.
@@ -6760,7 +6865,10 @@ export const executeRemoteMcpTool = async (origin, name, rawArguments, { signal 
               fresh, selectedName, selectedArguments, rawArguments, options),
           } : {}),
         },
-      )),
+      ));
+    return buildTextResult({
+      toolName,
+      result: compactLocalMcpResult(result),
       trust: "untrusted_external_data",
     });
   }
@@ -7347,7 +7455,8 @@ export const handleLocalMcpMessage = async (
       const workspace = name === TRELIO_WORKSPACE_ACTION_TOOL.name ? args
         : name === TRELIO_LOCAL_ACTION_TOOL.name && args?.route === "workspace" ? args.parameters : null;
       const ownsLifetime = (name === CODEX_CONNECTION_ACTION && args?.action === "connect")
-        || ["connect_remote_agent_skill", "call_remote_agent_skill_tool", TRELIO_LOCAL_PROPOSAL_RENDER_TOOL.name].includes(name)
+        || (name === "connect_remote_agent_skill" && args?.oauthSetupDecision !== "no_access")
+        || ["call_remote_agent_skill_tool", TRELIO_LOCAL_PROPOSAL_RENDER_TOOL.name].includes(name)
         || workspace && ["login", "encryption_setup", "skill_run", "secret_skill_run", "secret_exec"].includes(workspace.operation);
       // Only the exact read-only intent receives this allowance. Onboarding,
       // folder planning and ordinary MCP handlers keep their previous clock.
