@@ -1108,6 +1108,35 @@ export function installVisualAuthentication(definition, manualCompletion = null)
         respond(success ? { state: 'success', documentId } : { state: 'unknown' }); return;
       }
       if (message?.kind === 'authentication-guard') { respond({ blocked: sensitive() || Boolean(definition?.steps.some(step => challenge(step))) }); return; }
+      if (message?.kind === 'protected-password-form') {
+        // The extension asks only after the original protected submit. Keep
+        // the account label, field value and arbitrary site content inside
+        // this isolated document. A native password field and its singular
+        // continuation are the only controls this receipt can identify.
+        const password = unique('input[type="password"]');
+        const ready = password instanceof HTMLInputElement && !password.disabled && !password.readOnly
+          && !password.value && document.querySelectorAll('input[type="password"]').length === 1
+          && ![...document.querySelectorAll('input[autocomplete="one-time-code" i]')].some(visible);
+        if (!ready) { respond(null); return; }
+        const buttons = [...document.querySelectorAll('button,input[type="submit"]')];
+        if (buttons.length > 64) { respond(null); return; }
+        const next = buttons.filter(button => visible(button) && !button.disabled && button.form === password.form
+          && (button.form && button.type === 'submit' || button instanceof HTMLButtonElement && button.type !== 'reset'
+            && /^(next|continue|sign in|далее|продолжить|войти)$/iu.test(button.innerText.trim())));
+        if (next.length !== 1) { respond(null); return; }
+        const button = next[0];
+        if (button.form) {
+          const action = new URL(button.getAttribute('formaction') || button.form.action, location.href);
+          const target = button.formTarget || button.form.target || '_self';
+          if (action.origin !== location.origin || target !== '_self') { respond(null); return; }
+        }
+        const rect = button.getBoundingClientRect();
+        const x = Math.floor((Math.max(0, rect.left) + Math.min(innerWidth, rect.right)) / 2);
+        const y = Math.floor((Math.max(0, rect.top) + Math.min(innerHeight, rect.bottom)) / 2);
+        const hit = document.elementFromPoint(x, y);
+        respond(hit && button.contains(hit) ? { x, y } : null);
+        return;
+      }
       if (!definition) return;
       if (message?.kind === 'authentication-probe') { respond(probe(message.method)); return; }
       if (message?.kind === 'authentication-follow') {

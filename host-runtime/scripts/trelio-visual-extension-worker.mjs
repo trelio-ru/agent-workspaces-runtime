@@ -65,7 +65,7 @@ export function visualExtensionWorker(config, cookieState, createPacing, createT
   }
   let socket, frame, pendingLink, manual = config.manual === true, tail = Promise.resolve();
   let authenticating = false;
-  let protectedSecretTab, followingSecretClick;
+  let protectedSecretTab, followingSecretClick, submittedLogin;
   const secretDocumentMasks = new Map();
   function maskSecretDocument(tabId, loaderId) {
     const mask = secretDocumentMasks.get(tabId) ?? { loaders: new Set(), closed: false };
@@ -1005,6 +1005,51 @@ export function visualExtensionWorker(config, cookieState, createPacing, createT
   async function captureDefault(navigationStage) {
     return currentDialog() ? captureDialog() : config.observationMode === 'text' ? captureText({}, navigationStage) : capture(navigationStage);
   }
+  async function observePasswordAfterSubmit() {
+    const previous = submittedLogin;
+    const now = Date.now();
+    if (!previous || now >= previous.expiresAt || manual || authenticating || currentDialog()) return null;
+    const tab = await selected();
+    if (tab.id !== previous.tabId || new URL(tab.url).origin !== previous.origin || secretDocumentMasks.get(tab.id)?.closed
+      || documentFailures.has(tab.id) || httpFailures.has(tab.id)) return null;
+    const generation = navigationGeneration(tab.id);
+    const { frameTree } = await command(tab.id, 'Page.getFrameTree');
+    const document = frameTree?.frame;
+    const url = committedBrowserFrameUrl(document);
+    if (!document?.id || !document.loaderId || document.mimeType !== 'text/html'
+      || url !== new URL(tab.url).href) return null;
+    const point = await chrome.tabs.sendMessage(tab.id, { kind: 'protected-password-form' }, { frameId: 0 });
+    if (!point || Object.keys(point).sort().join(',') !== 'x,y'
+      || ![point.x, point.y].every(value => Number.isInteger(value) && value >= 0 && value <= 8192)) return null;
+    const after = (await command(tab.id, 'Page.getFrameTree')).frameTree?.frame;
+    if (previous !== submittedLogin || generation !== navigationGeneration(tab.id)
+      || committedBrowserFrameUrl(after) !== url || after?.id !== document.id || after.loaderId !== document.loaderId
+      || guardFailed || Date.now() >= previous.expiresAt || manual || authenticating || currentDialog()
+      || documentFailures.has(tab.id) || httpFailures.has(tab.id)) return null;
+    return { tabId: tab.id, generation, mainFrameId: document.id, loaderId: document.loaderId, url, point };
+  }
+  async function protectedPasswordReceipt() {
+    // An optional probe can fail after a known click. Keep its original
+    // dispatch receipt and leave the credential screen masked.
+    const next = await observePasswordAfterSubmit().catch(() => null);
+    if (!next) return null;
+    const frameId = crypto.randomUUID();
+    // This frame has no pixels and cannot authorize general input. Reuse the
+    // existing Secret observation binding with a fixed password check, then
+    // let its spent field-only handle own exactly the reported button.
+    const { point, ...target } = next;
+    maskSecretDocument(target.tabId, target.loaderId);
+    frame = { ...target, frameId, at: Date.now(), passwordPoint: point };
+    observedFrameId = frameId;
+    return { state: 'manual_input_required', reason: 'protected_password_ready', frameId, submitPoint: point };
+  }
+  async function currentPasswordReceipt(observation) {
+    const next = await observePasswordAfterSubmit();
+    return next && observation.tabId === next.tabId && observation.generation === next.generation
+      && observation.mainFrameId === next.mainFrameId && observation.loaderId === next.loaderId
+      && observation.url === next.url && observation.passwordPoint.x === next.point.x
+      && observation.passwordPoint.y === next.point.y;
+  }
   async function captureText(args = {}, navigationStage) {
     return observeFrame(() => captureTextValue(args, navigationStage));
   }
@@ -1146,7 +1191,8 @@ export function visualExtensionWorker(config, cookieState, createPacing, createT
       const observed = frame;
       const currentObservation = () => observed && frame === observed && observedFrameId === observed.frameId
         && observed.tabId === tab.id && observed.generation === navigationGeneration(tab.id)
-        && Date.now() - observed.at <= 60_000 && !isSecretDocumentMasked(tab.id, main.loaderId)
+        && Date.now() - observed.at <= 60_000
+        && (observed.passwordPoint ? Date.now() < (submittedLogin?.expiresAt ?? 0) : !isSecretDocumentMasked(tab.id, main.loaderId))
         && observed.mainFrameId === main.id && observed.loaderId === main.loaderId;
       const keys = Object.keys(args).sort().join(',');
       const observing = op === 'secret-browser-observe';
@@ -1154,7 +1200,8 @@ export function visualExtensionWorker(config, cookieState, createPacing, createT
       if (observing || bindObserved) {
         if (observing && keys !== 'expectedOrigin,frameId' || protectedSecretTab)
           throw Error('invalid_input');
-        if (!currentObservation() || observed.frameId !== args.frameId) throw Error('stale_frame');
+        if (!currentObservation() || observed.frameId !== args.frameId
+          || observed.passwordPoint && !await currentPasswordReceipt(observed)) throw Error('stale_frame');
         // Navigation policy alone does not choose a credential destination.
         // Compare the explicitly selected HTTPS origin, then hash the actual
         // committed URL in the native worker. Its path/query never leave it.
@@ -1177,13 +1224,13 @@ export function visualExtensionWorker(config, cookieState, createPacing, createT
         if (targetUrlSha256 !== args.targetUrlSha256) throw Error('stale_frame');
       }
       if (op === 'secret-browser-bind') {
-        if (protectedSecretTab || !bindObserved && (keys !== 'expiry,handle,targetUrl' || args.targetUrl !== documentUrl)
+        if (protectedSecretTab || !bindObserved && (keys !== 'expiry,handle,targetUrl' || args.targetUrl !== documentUrl || observed?.passwordPoint)
           || !Number.isSafeInteger(args.expiry) || args.expiry <= Date.now()
           || args.expiry > Math.min(Date.now() + 38_000, config.deadlineAt)
           || !currentObservation()) throw Error('stale_frame');
         protectedSecretTab = { handle: args.handle, tabId: tab.id, generation, frameId: main.id,
           loaderId: main.loaderId, url: documentUrl, observation: observed, expiry: args.expiry };
-        return { state: 'bound' };
+        return { state: 'bound', ...(observed.passwordPoint ? { protectedPassword: true } : {}) };
       }
       const binding = protectedSecretTab;
       if (!binding || Object.keys(args).sort().join(',') !== 'handle,method,params'
@@ -1203,6 +1250,12 @@ export function visualExtensionWorker(config, cookieState, createPacing, createT
         // Install the mask before the setter. A lost renderer response can
         // still mean that a value reached the page, so release retains it.
         if (binding.fieldAttempted) throw Error('invalid_input');
+        if (binding.observation.passwordPoint) {
+          if (!await currentPasswordReceipt(binding.observation) || Date.now() >= binding.expiry
+            || protectedSecretTab !== binding) throw Error('stale_frame');
+          // The password observation is spent by its own one-use grant.
+          submittedLogin = undefined;
+        }
         maskSecretDocument(tab.id, binding.loaderId);
         binding.fieldAttempted = true;
         binding.contextId = args.params.contextId;
@@ -1310,6 +1363,7 @@ export function visualExtensionWorker(config, cookieState, createPacing, createT
     if (guardFailed) throw documentBlocked(guardDiagnostic);
     if (op === 'navigate') {
       const url = allowedNavigation(args.url);
+      submittedLogin = undefined;
       frame = undefined;
       navigationStage?.('navigate_tab');
       await tabCleanup;
@@ -1328,7 +1382,7 @@ export function visualExtensionWorker(config, cookieState, createPacing, createT
       await pause(1000);
       return args.expectedDocumentUrl ? captureText({ expectedDocumentUrl: args.expectedDocumentUrl }, navigationStage) : captureDefault(navigationStage);
     }
-    if (op === 'screenshot') return capture(navigationStage);
+    if (op === 'screenshot') return await protectedPasswordReceipt() ?? capture(navigationStage);
     if (op === 'click' && followingSecretClick?.observation.frameId === args.frameId) {
       const binding = followingSecretClick, original = binding.observation;
       // Spend before inspecting the hit or dispatching anything. A lost
@@ -1341,9 +1395,11 @@ export function visualExtensionWorker(config, cookieState, createPacing, createT
         || documentFailures.has(tab.id) || httpFailures.has(tab.id) || currentDialog()
         || frameTree?.frame?.id !== binding.frameId || frameTree?.frame?.loaderId !== binding.loaderId
         || committedBrowserFrameUrl(frameTree.frame) !== binding.url || !isSecretDocumentMasked(tab.id, binding.loaderId)
-        || !Number.isInteger(args.x) || args.x < 0 || args.x >= original.width
-        || !Number.isInteger(args.y) || args.y < 0 || args.y >= original.height) throw Error('stale_frame');
-      const x = args.x * original.cssWidth / original.width, y = args.y * original.cssHeight / original.height;
+        || (original.passwordPoint ? args.x !== original.passwordPoint.x || args.y !== original.passwordPoint.y
+          : !Number.isInteger(args.x) || args.x < 0 || args.x >= original.width
+          || !Number.isInteger(args.y) || args.y < 0 || args.y >= original.height)) throw Error('stale_frame');
+      const x = original.passwordPoint ? args.x : args.x * original.cssWidth / original.width;
+      const y = original.passwordPoint ? args.y : args.y * original.cssHeight / original.height;
       const hit = await command(tab.id, 'Runtime.evaluate', {
         contextId: binding.contextId, returnByValue: true,
         expression: `globalThis.__trelioSecretBrowserCheckFollowingClick?.(${x},${y})`,
@@ -1354,6 +1410,8 @@ export function visualExtensionWorker(config, cookieState, createPacing, createT
       await command(tab.id, 'Input.dispatchMouseEvent', { type: 'mousePressed', x, y, button: 'left', buttons: 1, clickCount: 1 });
       assertInputCurrent(original);
       await command(tab.id, 'Input.dispatchMouseEvent', { type: 'mouseReleased', x, y, button: 'left', buttons: 0, clickCount: 1 });
+      if (!original.passwordPoint) submittedLogin = { tabId: tab.id, origin: new URL(binding.url).origin,
+        expiresAt: Math.min(config.deadlineAt, Date.now() + 60_000) };
       await pause(500);
       try {
         const observation = await captureDefault(navigationStage);
@@ -1365,7 +1423,7 @@ export function visualExtensionWorker(config, cookieState, createPacing, createT
       // Report dispatch separately from the provider's unverified result.
       // The original frame remains spent and neither pixels nor text escape
       // the same credential guard, including if the site stays on that page.
-      return { state: 'manual_input_required', reason: 'protected_submit_dispatched' };
+      return await protectedPasswordReceipt() ?? { state: 'manual_input_required', reason: 'protected_submit_dispatched' };
     }
     if (['read-text', 'submit', 'request-ready'].includes(op) && config.observationMode !== 'text') throw Error('invalid_input');
     if (op === 'read-text') return captureText(args, navigationStage);
@@ -1386,7 +1444,7 @@ export function visualExtensionWorker(config, cookieState, createPacing, createT
     }
     navigationStage?.('input_frame');
     const f = frame;
-    if (!f || f.frameId !== args.frameId || Date.now() - f.at > 60_000) throw Error('stale_frame');
+    if (!f || f.passwordPoint || f.frameId !== args.frameId || Date.now() - f.at > 60_000) throw Error('stale_frame');
     navigationStage?.('input_tab');
     const tab = await chrome.tabs.get(f.tabId); allowedNavigation(tab.url);
     navigationStage?.('input_credential_guard');

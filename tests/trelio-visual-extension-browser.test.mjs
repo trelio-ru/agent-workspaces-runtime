@@ -18,13 +18,13 @@ import { syntheticDocx } from './fixtures/visual-docx.mjs';
 import { observeVisualForeground } from './fixtures/visual-foreground.mjs';
 import vm from 'node:vm';
 
-test('native managed Secret binds the observed HTTPS document after a redirect and permits one reviewed click',
+test('native managed Secret binds redirected HTTPS login and password forms to separate one-use clicks',
   { skip: process.env.TRELIO_VISUAL_EXTENSION_TEST !== '1', timeout: 180_000 }, async t => {
     const directory = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'visual-native-secret-')));
     const keyFile = path.join(directory, 'fixture.key'), certFile = path.join(directory, 'fixture.pem');
     let browser, listener, redirectListener, controlListener;
     t.signal.addEventListener('abort', () => browser?.abort(), { once: true });
-    const value = 'fixture-value-' + randomUUID(), received = [];
+    const value = 'fixture-value-' + randomUUID(), passwordValue = 'fixture-password-' + randomUUID(), received = [];
     try {
       // A fresh loopback leaf per fixture, never a shared certificate,
       // trust-store mutation, public TLS exception or real credential.
@@ -39,7 +39,18 @@ test('native managed Secret binds the observed HTTPS document after a redirect a
           request.on('data', part => { body += part; });
           request.on('end', () => {
             received.push(new URLSearchParams(body).get('account') === value);
-            response.end('<!doctype html><title>Fixture</title><p>PRIVATE PASSWORD SCREEN</p><input type="password" aria-label="Password">');
+            response.end(`<!doctype html><title>Fixture</title><p>${value}</p>
+              <form method="post" action="/signed-in"><input type="password" name="password" aria-label="Password">
+              <button type="submit" style="position:absolute;left:30px;top:100px;width:170px;height:50px">Continue</button></form>`);
+          });
+          return;
+        }
+        if (request.url === '/signed-in' && request.method === 'POST') {
+          let body = '';
+          request.on('data', part => { body += part; });
+          request.on('end', () => {
+            received.push(new URLSearchParams(body).get('password') === passwordValue);
+            response.end('<!doctype html><title>Fixture</title><p>VERIFIED AUTHENTICATED DOCUMENT</p>');
           });
           return;
         }
@@ -159,16 +170,46 @@ test('native managed Secret binds the observed HTTPS document after a redirect a
       const input = { frameId: view.frameId, x, y };
       const clicked = await browser.call('click', input);
       assert.deepEqual(clicked, { kind: 'trelio.visual-browser/v1', state: 'manual_input_required',
-        reason: 'protected_submit_dispatched', sessionId: view.sessionId });
-      // Receiving the submit receipt does not permit either observation mode
-      // to read the new credential page or latch browser manual mode.
-      assert.equal((await browser.call('screenshot')).reason, 'manual_control_active');
+        reason: 'protected_password_ready', sessionId: view.sessionId, frameId: clicked.frameId, submitPoint: clicked.submitPoint });
+      assert.notEqual(clicked.frameId, view.frameId);
+      assert.doesNotMatch(JSON.stringify(clicked), new RegExp(value, 'u'));
+      // All normal content stays masked. A fresh safe observation can be
+      // prepared after the runtime has retired the first bound credential.
       assert.equal((await browser.call('read-text')).reason, 'manual_control_active');
       assert.deepEqual(await request(locator).then(response => response.json()),
         { state: 'refused', reasonCode: 'target_url_changed' });
       assert.equal((await browser.call('click', input)).reason, 'stale_frame');
       assert.deepEqual(received, [true]);
-      assert.equal((await browser.call('navigate', { url: entryUrl })).state, 'ready');
+      const emptyPassword = await browser.call('screenshot');
+      assert.equal(emptyPassword.reason, 'protected_password_ready');
+      const passwordObservation = { sessionId: emptyPassword.sessionId, frameId: emptyPassword.frameId };
+      const passwordBinding = await request({ operation: 'observe', ...passwordObservation, expectedOrigin: origin }).then(response => response.json());
+      assert.equal(passwordBinding.state, 'observed');
+      const passwordStep = {
+        targetOrigin: origin, targetUrlSha256: passwordBinding.targetUrlSha256, observedFrameSha256: passwordBinding.observedFrameSha256,
+        fields: [{ fieldKey: 'password', selector: 'input[type="password"]' }],
+      };
+      const passwordContext = { ...context, fieldKeys: ['password'], targetUrlSha256: passwordBinding.targetUrlSha256, browserSteps: [passwordStep] };
+      const passwordPlan = { operation: 'prepare', context: passwordContext, observation: passwordObservation };
+      // A credential-only observation never authorizes general input or a
+      // different form. Native note and actual secrets still use the same lane.
+      const passwordClick = { frameId: passwordObservation.frameId, ...emptyPassword.submitPoint };
+      assert.equal((await browser.call('click', passwordClick)).reason, 'stale_frame');
+      const wrongSelector = await request({ ...passwordPlan, context: { ...passwordContext,
+        browserSteps: [{ ...passwordStep, fields: [{ fieldKey: 'password', selector: '#other' }] }],
+      } }).then(response => response.json());
+      assert.equal(wrongSelector.reasonCode, 'field_selector_invalid');
+      const passwordPrepared = await request(passwordPlan).then(response => response.json());
+      assert.equal(passwordPrepared.state, 'ready', passwordPrepared.reasonCode);
+      const passwordHandle = passwordPrepared.handle;
+      assert.deepEqual(await request({ operation: 'fill', handle: passwordHandle, secretValues: { password: passwordValue } }).then(response => response.json()), { outcome: 'succeeded' });
+      await request({ operation: 'release', handle: passwordHandle }).then(response => response.json());
+      assert.equal((await browser.call('screenshot')).reason, 'manual_control_active');
+      const signedIn = await browser.call('click', passwordClick);
+      assert.equal(signedIn.state, 'ready', signedIn.reason);
+      assert.match(signedIn.text, /VERIFIED AUTHENTICATED DOCUMENT/u);
+      assert.equal((await browser.call('click', passwordClick)).reason, 'stale_frame');
+      assert.deepEqual(received, [true, true]);
     } finally {
       await controlListener?.stop(); await redirectListener?.stop(); await listener?.stop(); await browser?.close().catch(() => browser.abort());
       await fs.rm(directory, { recursive: true, force: true, maxRetries: 10, retryDelay: 200 });

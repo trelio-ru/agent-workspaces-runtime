@@ -27,7 +27,7 @@ import { workspaceParallelDirectory, workspaceRecoveryDirectory } from './trelio
 import { isAssistantMaterialTargetRefusal, assistantSkillCatalogueDirectory, loadAssistantDeviceCredential, hydrateAssistantEncryptedSkill,
   readAssistantEncryptedSnapshotBundle, projectAssistantSourceAccounts, assistantMaxChatUrl } from './trelio-assistant-transport.mjs';
 import { parseAccountCommand, SkillAccountError, SkillAccountCommandError } from './trelio-skill-accounts.mjs';
-import { parseVisualSkillOutput, visualMcpResult, VISUAL_RESULT_KIND } from './trelio-visual-result.mjs';
+import { parseVisualSkillOutput, visualMcpResult, visualStatus, VISUAL_RESULT_KIND } from './trelio-visual-result.mjs';
 import { readSkillSecretSetupCommand, deliverSkillSetupEnvironment } from './trelio-skill-secret-setup.mjs';
 import { browserControllerEnabled, parseBrowserControllerArguments, runBrowserControllerCommand } from './trelio-browser-session.mjs';
 import { isSecretBrowserFillReason, SecretBrowserFillError } from './trelio-secret-browser.mjs';
@@ -1061,7 +1061,7 @@ export const materializeAssistantBrowser = async ({identity,host,store,result,ar
   const visual=await (run??runVisualSession)({origins:[site.origin],externalNavigation:true,presentation:'hidden',
     ...(grant.readOnly?{}:{assistantBrowserSecrets:true}),operation,args:input,env:environment});
   const viewed=visualMcpResult(visual);
-  if(!grant.readOnly&&visual.state==='ready'&&visual.sessionId&&visual.frameId){
+  if(!grant.readOnly&&(visual.state==='ready'||visual.reason==='protected_password_ready')&&visual.sessionId&&visual.frameId){
     // Only the exact managed observation can supply the form origin. Keep
     // URL path/query and hashes off the model-facing visual result. Missing
     // or stale optional metadata leaves the original observation intact.
@@ -1069,9 +1069,22 @@ export const materializeAssistantBrowser = async ({identity,host,store,result,ar
       runtimeSessionId:grant.runtimeSessionId,directory:host.configurationDirectory,signal,originOnly:true,
       observation:{sessionId:visual.sessionId,frameId:visual.frameId,siteOrigin:site.origin}}).catch(()=>null);
     signal?.throwIfAborted();
-    if(located&&JSON.stringify(await host.readActivePass())===JSON.stringify(pass))
-      viewed.structuredContent={browserObservation:{sessionId:visual.sessionId,frameId:visual.frameId,
-        siteOrigin:site.origin,observedOrigin:located.targetOrigin}};
+    if(located&&JSON.stringify(await host.readActivePass())===JSON.stringify(pass)){
+      const browserObservation={sessionId:visual.sessionId,frameId:visual.frameId,
+        siteOrigin:site.origin,observedOrigin:located.targetOrigin};
+      if (visual.reason==='protected_password_ready') {
+        // Keep the existing observed form binding and its point together.
+        // The closed result has no image or page text.
+        const metadata=JSON.parse(viewed.content[0].text);
+        viewed.content[0].text=JSON.stringify({...metadata,browserObservation});
+      } else viewed.structuredContent={browserObservation};
+    } else if (visual.reason==='protected_password_ready'){
+      // Only an independently verified current origin makes the staged
+      // password receipt usable. Acknowledge a previous click if it occurred.
+      return visualMcpResult(operation==='click'
+        ? visualStatus('manual_input_required','protected_submit_dispatched',{sessionId:visual.sessionId})
+        : visualStatus('error','manual_control_active',{sessionId:visual.sessionId}));
+    }
   }
   return viewed;
 };

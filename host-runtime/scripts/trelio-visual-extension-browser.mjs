@@ -510,6 +510,16 @@ export class ExtensionVisualBrowser {
         const bound = await this.#send('secret-browser-bind', { handle, ...target, expiry });
         if (bound?.state !== 'bound') return { state: 'refused', reasonCode: bound?.reasonCode === 'target_origin_changed'
           ? 'target_origin_changed' : 'target_url_changed' };
+        if (bound.protectedPassword === true) {
+          const step = binding.browserSteps[0];
+          // This value-free observation identifies one empty password box.
+          // Its button remains a separate explicit, one-use click.
+          if (!observedPlan || step.submitSelector || step.fields.length !== 1
+            || step.fields[0].fieldKey !== 'password' || step.fields[0].selector !== 'input[type="password"]') {
+            await this.#send('secret-browser-release', { handle, allowFollowingClick: false });
+            return { state: 'refused', reasonCode: 'field_selector_invalid' };
+          }
+        }
         const current = { handle, expiry, used: false, fieldOnly: !binding.browserSteps[0].submitSelector };
         this.#secretReservation = current;
         try {
@@ -1246,6 +1256,12 @@ export class ExtensionVisualBrowser {
         if (operation !== 'click' || !this.#assistantBrowserSecrets || value.state !== 'manual_input_required'
           || Object.keys(value).sort().join(',') !== 'reason,state') throw fault('invalid_input');
         return visualStatus(value.state, value.reason, { sessionId: this.sessionId });
+      }
+      if (value.reason === 'protected_password_ready') {
+        if (!['click', 'screenshot'].includes(operation) || !this.#assistantBrowserSecrets || value.state !== 'manual_input_required'
+          || Object.keys(value).sort().join(',') !== 'frameId,reason,state,submitPoint') throw fault('invalid_input');
+        return visualStatus(value.state, value.reason, { sessionId: this.sessionId,
+          frameId: value.frameId, submitPoint: value.submitPoint });
       }
       // A native prompt outside the supported alert/confirm contract is a
       // concrete handoff, not a successful click or a generic transport error.

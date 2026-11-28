@@ -4523,6 +4523,17 @@ after the browser has acknowledged the one native click, the reply reports
 `protected_submit_dispatched` with no pixels or page content. This records
 only the input dispatch. It does not report sign-in success or authorize
 another click. An independent read may observe a later non-sensitive page.
+When the same owned tab and HTTPS origin instead show a unique empty password
+box and a unique native continuation, the closed `protected_password_ready`
+receipt carries the usual browser observation and that button point. The
+renderer validates this shape privately, including empty value, no visible OTP,
+and a same-form native button. It returns no page text or pixels. This
+continuation is tied to the acknowledged prior click's 60-second window.
+The existing grant still independently admits the selected Run, secret and
+same committed destination. Only a new field-only `password` grant with
+`input[type="password"]` can use this frame. Its existing one-use follow-up
+click is restricted to the reported point. An actual signed-in page must
+still be verified separately.
 
 Genuine pre-consume adapter refusals retain a closed reason through the
 assistant Workspace process and facade. This receipt only classifies that
