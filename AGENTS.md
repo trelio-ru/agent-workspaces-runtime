@@ -405,6 +405,15 @@ publication tooling также остаются вне этого публичн
   speed. Recovered children and a twelve-second warm read keep production clocks.
   The isolated native fixture uses the runner-owned short Windows HOME, not a
   long profile-TEMP nesting; filesystem diagnostics expose closed errno/syscall only.
+  Signed encrypted accepted inspections preserve the ordinary HTTPS/body
+  limits and use the admitted child budget for local Git history. They stop
+  local work before the child deadline so owned staging can be removed.
+  Stream every frame by position from the original ciphertext descriptor.
+  Long chains must leave no per-frame listeners or stderr warnings that mask
+  the isolated worker's closed result. Keep the exact recipient and pass fences.
+  Complete the ordinary checkpoint before the short-lived managed form
+  observation, then prepare and use the native grant consecutively. Preserve
+  the original document witness and classify uncertain delivery normally.
   Genuine common HTTP errors reuse the closed bridge diagnostic vocabulary,
   without backend prose or device-auth recovery. Status-shaped foreign errors
   remain local failures; numeric request-frame tails admit only fixed HTTP buckets.

@@ -368,17 +368,18 @@ test("capabilities reject a foreign base and never confuse part size with file s
   assert.throws(() => validateEncryptedWorkspaceCapabilities({ ...storage, limits: { ...storage.limits, partSizeBytes: 100 * 1024 * 1024 } }, metadata), /protocol/u);
 });
 
-test("encrypted full-base plus delta history restores real Git bytes and rejects damaged parent binding", async (t) => {
+test("a long encrypted history restores Git bytes without accumulating handle listeners", async (t) => {
   const { directory, metadata, companyEncryption, git } = await fixture(t);
   const revisions = [];
   const frames = [];
-  for (let index = 0; index < 2; index++) {
+  for (let index = 0; index < 12; index++) {
+    const previous = revisions.at(-1);
     await fs.writeFile(path.join(metadata.workspaceDirectory, "result.txt"), `revision ${index}`);
     await git(["add", "--all"]); await git(["commit", "-m", `Ревизия ${index}`]);
     const head = (await git(["rev-parse", "HEAD"])).stdout.trim();
     await git(["update-ref", "refs/heads/trelio-candidate", head]);
     const sourcePath = path.join(directory, `${index}.bundle`);
-    await git(["bundle", "create", sourcePath, "refs/heads/trelio-candidate", ...(index ? [`^${revisions[0].workspaceHead}`] : [])]);
+    await git(["bundle", "create", sourcePath, "refs/heads/trelio-candidate", ...(previous ? [`^${previous.workspaceHead}`] : [])]);
     const destinationPath = path.join(directory, `${index}.trelioe1`);
     const encrypted = await encryptFileToCompanyContainer({ sourcePath, destinationPath,
       scopePublicEncryptionJwk: companyEncryption.runtime.scope.publicEncryptionJwk,
@@ -386,8 +387,8 @@ test("encrypted full-base plus delta history restores real Git bytes and rejects
         entityType: "agent_workspace_revision", entityId: metadata.runId, entityRevision: 1 },
       originalName: "workspace.bundle", mimeType: "application/vnd.git.bundle",
       writerDeviceId: companyEncryption.runtime.device.id, signingPrivateKey: companyEncryption.device.privateKeys.signingPrivateKey });
-    revisions.push({ id: randomUUID(), workspaceHead: head, baseHead: index ? revisions[0].workspaceHead : metadata.baseHead,
-      bundleFormat: index ? "delta" : "full", parentRevisionId: index ? revisions[0].id : null,
+    revisions.push({ id: randomUUID(), workspaceHead: head, baseHead: previous?.workspaceHead ?? metadata.baseHead,
+      bundleFormat: previous ? "delta" : "full", parentRevisionId: previous?.id ?? null,
       scopeId: companyEncryption.runtime.scope.id, scopeEpoch: 1, ciphertextSha256: encrypted.ciphertextSha256,
       ciphertextSizeBytes: encrypted.ciphertextSizeBytes });
     frames.push(await fs.readFile(destinationPath));
@@ -401,13 +402,22 @@ test("encrypted full-base plus delta history restores real Git bytes and rejects
   };
   await saveTransport();
   const destination = path.join(directory, "restored.bundle");
+  const newest = revisions.at(-1);
   const options = { sourcePath, destination, companyEncryption, expectedWorkspaceId: metadata.workspaceId,
-    expectedWorkspaceHead: revisions[1].workspaceHead, expectedCiphertextSha256: revisions[1].ciphertextSha256,
+    expectedWorkspaceHead: newest.workspaceHead, expectedCiphertextSha256: newest.ciphertextSha256,
     ensurePrivateDirectory, runGit: (args) => exec("git", args) };
-  await materializeEncryptedWorkspaceChain(options);
+  let listenerWarning = false;
+  const observe = warning => {
+    if (warning.name === "MaxListenersExceededWarning" && warning.type === "close" && warning.emitter?.constructor.name === "FileHandle")
+      listenerWarning = true;
+  };
+  process.on("warning", observe);
+  try { await materializeEncryptedWorkspaceChain(options); }
+  finally { process.off("warning", observe); }
+  assert.equal(listenerWarning, false, "one descriptor holds only its owned lifetime");
   const restored = path.join(directory, "restored");
   await exec("git", ["clone", "-b", "trelio-candidate", destination, restored]);
-  assert.equal(await fs.readFile(path.join(restored, "result.txt"), "utf8"), "revision 1");
+  assert.equal(await fs.readFile(path.join(restored, "result.txt"), "utf8"), "revision 11");
   // Cancel after a genuine import. The next Git step must not run and the
   // operation cannot publish an incomplete bundle or retain its scratch repo.
   const controller = new AbortController();

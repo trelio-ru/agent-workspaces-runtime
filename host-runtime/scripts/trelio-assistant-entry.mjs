@@ -4653,8 +4653,14 @@ export const executeAssistantWorkspacePlan = async (raw,{withProfile=withProduct
   readDraftRecovery=withProfile===withProductionAssistantWorkspace?readProductionWorkspaceDraftRecovery:async()=>null,
   expectedOrigin='https://trelio.ru'}={}) => {
   const plan=await validateAssistantWorkspacePlan(raw,{expectedOrigin});
+  const encryptedInspection=plan.localAction.operation==='inspect' && Boolean(plan.encryptedInspection);
+  // The signed caller has 240s for the whole inspection. Stop local Git
+  // work in time to remove its own staging directory. Individual HTTPS
+  // requests still use the common, shorter response/body deadline.
+  const materializationFailure=encryptedInspection?'ASSISTANT_WORKSPACE_INSPECTION_TIMED_OUT':'ASSISTANT_WORKSPACE_OPEN_TIMED_OUT';
   const materialization=plan.localAction.operation==='open'
-    ?AbortSignal.timeout(ASSISTANT_WORKSPACE_MATERIALIZATION_MS):undefined;
+    ?AbortSignal.timeout(ASSISTANT_WORKSPACE_MATERIALIZATION_MS)
+    :encryptedInspection?AbortSignal.timeout(taskSkillExecutionTimeoutMs-30_000):undefined;
   return withProfile(async({identity,client,store,host,withSecretGenerationKey,selectCompanySecretContext,prepareWorkspaceRun})=>{
     const common=await loadCommon(),context=await loadContext();
     const {validateAssistantActivePass}=await import('./trelio-assistant-hook.mjs');
@@ -4920,7 +4926,7 @@ export const executeAssistantWorkspacePlan = async (raw,{withProfile=withProduct
             nativeBrowserPreflight=error;
           }
           if(materialization?.aborted&&(error===materialization.reason||error?.cause===materialization.reason))
-            nativeCommandPolicyCause='ASSISTANT_WORKSPACE_OPEN_TIMED_OUT';
+            nativeCommandPolicyCause=materializationFailure;
           // Reuse the ordinary in-process -> CLI error projection so common
           // lease/recovery and bounded HTTP classification remain identical.
           if(assistantHealthFailure(error))nativeHealthCause=error.code;
@@ -4951,7 +4957,7 @@ export const executeAssistantWorkspacePlan = async (raw,{withProfile=withProduct
         :taskDraftCheckpoint?{...result,taskDraftCheckpoint}:result;
     } catch(error) {
       if(materialization?.aborted && (error===materialization.reason || error?.cause===materialization.reason))
-        fail('ASSISTANT_WORKSPACE_OPEN_TIMED_OUT');
+        fail(materializationFailure);
       if(nativeBrowserPreflight)throw nativeBrowserPreflight;
       const diagnostic=error?.details?.http?.failureCode;
       if(error?.code==='TRELIO_WORKSPACE_ACTION_FAILED' && typeof diagnostic==='string')error.code=diagnostic;

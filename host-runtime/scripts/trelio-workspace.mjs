@@ -15574,7 +15574,9 @@ const materializeWorkspaceInspection = async ({
   rawSnapshot,
   companyEncryption,
   resolvePayloads,
+  signal,
 }) => {
+  signal?.throwIfAborted();
   const { acceptedHead } = validateWorkspaceReadSnapshot(rawSnapshot, workspaceId);
   const snapshot = await hydrateAgentCompanyEncryptedJson({
     value: rawSnapshot,
@@ -15597,21 +15599,22 @@ const materializeWorkspaceInspection = async ({
     const workspaceDirectory = path.join(targetRoot, "workspace");
     const gitStat = await fs.lstat(path.join(workspaceDirectory, ".git"));
     if (!gitStat.isDirectory() || gitStat.isSymbolicLink()) throw new Error("Unsafe inspection Git directory.");
-    const gitHead = await runGit(["rev-parse", "HEAD"], { cwd: workspaceDirectory });
+    const gitHead = await runGit(["rev-parse", "HEAD"], { cwd: workspaceDirectory, signal });
     if (gitHead.stdout.trim() !== acceptedHead) throw new Error("Inspection Git head changed.");
-    await runGit(["diff", "--cached", "--quiet", "--no-ext-diff", acceptedHead, "--"], { cwd: workspaceDirectory });
+    await runGit(["diff", "--cached", "--quiet", "--no-ext-diff", acceptedHead, "--"], { cwd: workspaceDirectory, signal });
     if (cached.schemaVersion !== 1 || cached.mode !== "read_only_accepted_workspace"
       || cached.origin !== origin || cached.workspaceId !== workspaceId
       || cached.company?.id !== snapshot.company.id || cached.acceptedHead !== acceptedHead
       || !sameLocalPath(cached.workspaceDirectory, workspaceDirectory)
       || JSON.stringify(cached.encryption) !== JSON.stringify(companyEncryption?.metadata ?? { enabled: false })
       || !cached.contentFingerprint
-      || cached.contentFingerprint !== await fingerprintWorkspaceInspection(workspaceDirectory)) cached = null;
+      || cached.contentFingerprint !== await fingerprintWorkspaceInspection(workspaceDirectory, { signal })) cached = null;
   } catch {
     // A missing Git directory or file is also an invalid cache, even if its
     // metadata was already read successfully before the ENOENT.
     cached = null;
   }
+  signal?.throwIfAborted();
   if (cached) {
     const contextDirectory = path.join(targetRoot, "context");
     const freshContextRoot = await fs.mkdtemp(path.join(inspectionDirectory, `.${workspaceId}.context-`));
@@ -15619,6 +15622,7 @@ const materializeWorkspaceInspection = async ({
       await writeWorkspaceInspectionContext({ rootDirectory: freshContextRoot, publishedRootDirectory: targetRoot,
         workspace: snapshot.workspace, company: snapshot.company, acceptedHead,
         agentInstructionsSnapshot: snapshot.agentInstructionsSnapshot, userProfileSnapshot: snapshot.userProfileSnapshot });
+      signal?.throwIfAborted();
       const contextStat = await fs.lstat(contextDirectory);
       if (!contextStat.isDirectory() || contextStat.isSymbolicLink()) throw new Error("Unsafe inspection context directory.");
       await makeWritable(contextDirectory);
@@ -15661,6 +15665,8 @@ const materializeWorkspaceInspection = async ({
         companyEncryption,
         expectedWorkspaceId: workspaceId,
         expectedWorkspaceHead: acceptedHead,
+        signal,
+        localMaterializationSignal: signal,
         inspectResponse: (response) => {
           if (response.headers.get("x-trelio-accepted-head") !== acceptedHead) {
             throw new Error("Trelio вернул read-only bundle другой принятой ревизии.");
@@ -15684,12 +15690,13 @@ const materializeWorkspaceInspection = async ({
       directory: workspaceDirectory,
       head: acceptedHead,
       branch: "trelio-readonly",
+      signal,
     });
     await assertMaterializedWorkspaceFileTypes(workspaceDirectory);
     // chmod-based protection must not appear as content changes when accepted
     // files carry executable bits. The snapshot has no Run metadata or submit
     // route, and this config adds a second local guard on POSIX.
-    await runGit(["config", "core.fileMode", "false"], { cwd: workspaceDirectory });
+    await runGit(["config", "core.fileMode", "false"], { cwd: workspaceDirectory, signal });
     await makeReadOnly(workspaceDirectory);
     if (process.platform !== "win32") {
       await fs.chmod(workspaceDirectory, 0o555);
@@ -15716,8 +15723,9 @@ const materializeWorkspaceInspection = async ({
       encryptedRevisionId,
       workspaceDirectory: path.join(targetRoot, "workspace"),
       createdAt: new Date().toISOString(),
-      contentFingerprint: await fingerprintWorkspaceInspection(workspaceDirectory),
+      contentFingerprint: await fingerprintWorkspaceInspection(workspaceDirectory, { signal }),
     });
+    signal?.throwIfAborted();
     await removePreviousWorkspaceInspection(targetRoot, workspaceId);
     await fs.rename(stagingRoot, targetRoot);
     published = true;
@@ -16002,7 +16010,8 @@ export const readEncryptedWorkspaceSearchDocuments = async (input) => {
   return documents;
 };
 
-export const inspectAcceptedWorkspace = async (origin, options) => {
+export const inspectAcceptedWorkspace = async (origin, options, { signal } = {}) => {
+  signal?.throwIfAborted();
   const workspaceId = requireUuid(options.workspace, "workspace");
   const token = await requireToken(origin);
   await ensureBridgeCompatibility(origin, token);
@@ -16021,6 +16030,7 @@ export const inspectAcceptedWorkspace = async (origin, options) => {
         workspaceOrigin,
         token,
         `/api/agent-workspaces/workspaces/${workspaceId}/read-snapshot`,
+        { signal },
       );
       const snapshotResponse=inspectionProfile?.readWorkspaceInspectionResponse
         ? await inspectionProfile.readWorkspaceInspectionResponse(snapshotHttpResponse) : await readJsonResponse(snapshotHttpResponse);
@@ -16041,8 +16051,11 @@ export const inspectAcceptedWorkspace = async (origin, options) => {
         workspaceId,
         rawSnapshot,
         companyEncryption,
+        signal,
       }));
+      signal?.throwIfAborted();
       await inspectionProfile?.assertWorkspaceInspectionCurrent?.();
+      signal?.throwIfAborted();
       // Internal callers may validate immutable accepted material in the SAME
       // cache. Keys/context stay process-only; the public CLI below still
       // returns only its ordinary read-only directory.
@@ -16062,8 +16075,8 @@ export const inspectAcceptedWorkspace = async (origin, options) => {
   }
 };
 
-const inspectWorkspace = async (origin, options) => {
-  const inspection = await inspectAcceptedWorkspace(origin, options);
+const inspectWorkspace = async (origin, options, signal) => {
+  const inspection = await inspectAcceptedWorkspace(origin, options, { signal });
   process.stdout.write(`${inspection.workspaceDirectory}\n`);
 };
 
@@ -22373,7 +22386,7 @@ export const runWorkspaceCommand = async (rawArguments = process.argv.slice(2), 
     if (positional.length !== 0) {
       throw new Error("Команда inspect не принимает позиционные параметры.");
     }
-    await inspectWorkspace(origin, options);
+    await inspectWorkspace(origin, options, assistantMaterializationSignal);
   } else if (command === "open") {
     await openWorkspace(origin, options, retainedAssistantFinish, assistantMaterializationSignal, assertAssistantMaterializationCurrent);
   } else if (command === "status") {

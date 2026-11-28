@@ -1,5 +1,5 @@
 import crypto from "node:crypto";
-import { constants, createReadStream, createWriteStream } from "node:fs";
+import { constants, createWriteStream } from "node:fs";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -371,7 +371,20 @@ export const materializeEncryptedWorkspaceChain = async ({
       seen.add(revision.id);
       const encryptedPath = path.join(directory, `${index}.trelioe1`);
       const bundlePath = path.join(directory, `${index}.bundle`);
-      await pipeline(source.createReadStream({ start: offset, end: offset + revision.ciphertextSizeBytes - 1, autoClose: false }),
+      // Read each range from the original descriptor. A FileHandle-backed
+      // stream leaves close listeners on that handle after every revision.
+      // Positional reads keep one owner and bound each frame's memory use.
+      const end = offset + revision.ciphertextSizeBytes;
+      async function* readFrame() {
+        for (let position = offset; position < end;) {
+          signal?.throwIfAborted();
+          const length = Math.min(256 * 1024, end - position);
+          const bytes = await readPart(source, position, length);
+          position += length;
+          yield bytes;
+        }
+      }
+      await pipeline(readFrame(),
         createWriteStream(encryptedPath, { flags: "wx", mode: 0o600 }), { signal });
       opened = await decryptFileFromCompanyContainer({ sourcePath: encryptedPath, destinationPath: bundlePath,
         scopePrivateKey: companyEncryption.scopePrivateEncryptionKey.privateKey,
