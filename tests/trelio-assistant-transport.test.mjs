@@ -5442,10 +5442,14 @@ test('a private intake opens the complete native company-read catalogue from its
  const origin='https://initial-discovery.test',assistantId=randomUUID(),deviceId=randomUUID(),store=memoryStore();
  await store.put({origin,kind:'device',id:assistantId},{assistantId,deviceId,credential:`tda_${'d'.repeat(43)}`,expiresAt:1});
  let active=null;const calls=[],catalogueViews=[];
- const companyReads=['search','search_tasks','fetch','get_project_meta','list_my_tasks','get_contact','get_task'];
+ const fileRead='get_agent_workspace_file';
+ const pinnedFile={workspaceId:randomUUID(),workspaceHead:'a'.repeat(40),filePath:'artifacts/state.json'};
+ const companyReads=['search','search_tasks','fetch','get_project_meta','list_my_tasks','get_contact','get_task',fileRead];
  const definition=name=>({name,description:`Native ${name}`,inputSchema:{type:'object',properties:{
   ...(['search','search_tasks'].includes(name)?{queries:{type:'array',items:{type:'string'},minItems:1}}:{}),
-  ...(name==='fetch'?{id:{type:'string'}}:{}),intakePass:{},taskPass:{},runtimeSessionProof:{}},additionalProperties:false}});
+  ...(name==='fetch'?{id:{type:'string'}}:{}),
+  ...(name===fileRead?Object.fromEntries(Object.keys(pinnedFile).map(key=>[key,{type:'string'}])):{}),
+  intakePass:{},taskPass:{},runtimeSessionProof:{}},additionalProperties:false}});
  const client=createAssistantMcpClient({origin,assistantId,deviceId,store,readActivePass:async()=>active,httpRequest:async input=>{
   const view=input.config.headers['x-trelio-assistant-capability-profile']??'task';
   const response=result=>({sessionId:'initial',message:{jsonrpc:'2.0',id:input.payload?.id,result}});
@@ -5458,12 +5462,15 @@ test('a private intake opens the complete native company-read catalogue from its
     :view==='source_intake'?['get_assistant_status','get_assistant_intake_context','resolve_assistant_intake']
     :['get_assistant_status','get_task','update_task_title']).map(definition)});
   }
-  calls.push({view,name:input.payload.params.name});return response({content:[],structuredContent:{view}});
+  const {name,arguments:args}=input.payload.params;
+  if(name===fileRead) assert.deepEqual(args,pinnedFile,'the native exact read receives only the selected immutable file');
+  calls.push({view,name});return response({content:[],structuredContent:{view}});
  }});
  const taskTools=await client.listTools();
  for(const name of ['get_task','update_task_title','get_assistant_intake_context','resolve_assistant_intake','get_trelio_tool_contract'])
   assert.ok(taskTools.some(tool=>tool.name===name),`${name} keeps its native task/setup path`);
- for(const name of companyReads.filter(name=>name!=='get_task'))
+ assert.equal(taskTools.find(tool=>tool.name===fileRead)?.annotations.readOnlyHint,true,'a task can read a known accepted file before opening a Run');
+ for(const name of companyReads.filter(name=>name!=='get_task'&&name!==fileRead))
   assert.equal(taskTools.some(tool=>tool.name===name),false,'no second search subset in an unbound task catalogue');
  active={kind:'source_intake',intakeKind:'owner_command'};
  catalogueViews.length=0;
@@ -5483,8 +5490,9 @@ test('a private intake opens the complete native company-read catalogue from its
  await assert.rejects(client.callTool('search_tasks',{queries:['not an owner']}),/CAPABILITY_UNAVAILABLE/);
  active={kind:'task'};
  assert.equal((await client.callTool('search',{queries:['native task read']})).structuredContent.view,'company_context');
+ assert.equal((await client.callTool(fileRead,pinnedFile)).structuredContent.view,'company_context','the initial task route uses the actual company-read schema and handler');
  assert.equal((await client.callTool('get_task',{})).structuredContent.view,'task','ordinary exact task read keeps its original native adapter');
- assert.deepEqual(calls.map(call=>call.name),['search_tasks','get_task','get_contact','search','get_task'],'no extra model view command or writer');
+ assert.deepEqual(calls.map(call=>call.name),['search_tasks','get_task','get_contact','search',fileRead,'get_task'],'no extra model view command or writer');
 });
 
 test('catalogue scalar sharing is lossless, tool-local and preserves all native bounds and business annotations',()=>{

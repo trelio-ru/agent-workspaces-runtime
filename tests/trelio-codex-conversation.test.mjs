@@ -1006,7 +1006,7 @@ const make=()=>createAssistantMcpClient({origin,assistantId,deviceId,readActiveP
  if(input.payload.method!=='tools/list')throw Error('NO_TOOL_CALL_OR_MODEL_ALLOWED');
  const view=input.config.headers['x-trelio-assistant-capability-profile'];
  return reply({tools:view==='source_intake'?['get_assistant_status','get_assistant_intake_context','resolve_assistant_intake'].map(definition)
- :view==='company_context'?['get_assistant_status','search','search_tasks','fetch','get_trelio_tool_contract','list_projects','get_registry'].map(definition):native});}});
+ :view==='company_context'?['get_assistant_status','search','search_tasks','fetch','get_trelio_tool_contract','get_agent_workspace_file','list_projects','get_registry'].map(definition):native});}});
 await runAssistantSetupMcp({createMcp:async()=>make(),preservePlugin:()=>null});
 `);
  const inventory=async scope=>{
@@ -1039,7 +1039,7 @@ await runAssistantSetupMcp({createMcp:async()=>make(),preservePlugin:()=>null});
   });
  };
  const [task,owner]=await Promise.all([inventory('task'),inventory('owner')]);
- const shared=['get_assistant_status','get_trelio_tool_contract','get_assistant_intake_context','resolve_assistant_intake'];
+ const shared=['get_assistant_status','get_trelio_tool_contract','get_agent_workspace_file','get_assistant_intake_context','resolve_assistant_intake'];
  const companyReads=['search','search_tasks','fetch','list_projects','get_registry'];
  for(const name of [...shared,'get_task','create_comment','complete_assistant_pass'])
   assert.ok(Object.hasOwn(task,name),`${name} must exist in the first task catalogue`);

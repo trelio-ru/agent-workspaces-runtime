@@ -2608,15 +2608,17 @@ deferred contracts, original task/KB attachment downloads and one exact publishe
 registry-file selector; task writers/owner setup/source intake are not appended.
 Raw and model catalogues each retain 65 536 bytes, transport retains 4 MiB.
 
-Initial task/intake discovery also includes the native `search`, `fetch` and
-`get_trelio_tool_contract` definitions from that SAME company session. They are
-present before a pass/model turn, not dependent on `get_assistant_status` or a
-late `tools/list_changed` refresh. Codex may finish a turn before refreshing its
-model inventory. Writers remain advertised, but metadata never grants their
-execution to an intake. Company discovery calls use the native company session;
-ordinary task `get_task` retains its task schema/adapter. A routing-only intake
-still refuses search before I/O. Search results are followed by exact fetch and
-needed current discussion; snippets or stale initial descriptions are not facts.
+Initial task discovery includes `get_trelio_tool_contract` and the native exact
+`get_agent_workspace_file` definition from that SAME company session. Use the
+known relative path and accepted head from the original read preparation after
+applying the Workspace's current authority. The isolated task can read the
+accepted bytes before opening a writable Run or refreshing its catalogue.
+Execution rereads the exact native schema and rechecks the task pass, source
+ACL and pinned revision in the same company read route. Private owner intake
+still gets the complete read view before its first model turn. Ordinary task
+`get_task` retains its task schema and adapter. Routing-only intake refuses
+search before I/O. Read the origin of search matches and the needed current
+discussion before relying on them.
 
 Encrypted search completion reuses the SAME complete company mirror and common
 short-wait operation registry. Each `search` consumes a fresh native schema/proof/

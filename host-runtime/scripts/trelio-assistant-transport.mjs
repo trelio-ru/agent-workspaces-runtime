@@ -4340,11 +4340,12 @@ export const createAssistantMcpClient = ({ origin, assistantId, deviceId, store,
         'request_assistant_profile_update','use_assistant_browser','use_assistant_workspace_files',
         ...(profile==='skill_setup'?[]:['review_outgoing_message']),
       ]);
-      // The native schema contract is presentation-independent metadata used
-      // by readers and writers alike. Get its definition from the existing
-      // native catalogue, never reimplement its schema in the host.
+      // The isolated task has no shell. It must be able to read a known
+      // accepted file before an own Run exists, even when Desktop retains its
+      // initial catalogue. Both definitions come from the existing native
+      // read view; executing the file read still uses that view and its ACL.
       const contract=profile==='task'
-        ? await catalogue([],'company_context',true,['get_trelio_tool_contract']):[];
+        ? await catalogue([],'company_context',true,['get_trelio_tool_contract','get_agent_workspace_file']):[];
       let result=[...normal,...intake,...contract].filter((tool,index,all)=>all.findIndex(row=>row.name===tool.name)===index);
       if(Buffer.byteLength(JSON.stringify(result))>65_536){
         // Lossless MCP defaults only: false readOnly/idempotent, true

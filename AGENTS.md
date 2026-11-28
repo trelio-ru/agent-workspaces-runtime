@@ -214,6 +214,9 @@ publication tooling также остаются вне этого публичн
   read calls with the verified Run locators. Each call keeps independent native
   admission and local lease validation. The suggested reads carry no absolute
   filesystem path, proof or write authority.
+- The initial task catalogue includes the native exact accepted-file reader
+  for an independently authorized Workspace/head/path. It works before a Run
+  and uses the same company-read transport and ACL.
 - Interrupted task draft settlement is a one-use continuation of the SAME
   pass, only after its exact lease expires and the full latest native history
   proves an existing canonical Run and settled local-only draft edits. The
