@@ -1241,6 +1241,12 @@ export class ExtensionVisualBrowser {
         ...(value.reason === 'document_blocked' && value.documentDiagnostic
           ? { documentDiagnostic: validateVisualDocumentDiagnostic(value.documentDiagnostic) } : {}),
         ...(value.reason === 'http_document_failure' ? { httpStatus: value.httpStatus, origin: value.origin } : {}) });
+      if (value.reason === 'protected_submit_dispatched') {
+        // Acknowledging the click leaves ordinary later observations available.
+        if (operation !== 'click' || !this.#assistantBrowserSecrets || value.state !== 'manual_input_required'
+          || Object.keys(value).sort().join(',') !== 'reason,state') throw fault('invalid_input');
+        return visualStatus(value.state, value.reason, { sessionId: this.sessionId });
+      }
       // A native prompt outside the supported alert/confirm contract is a
       // concrete handoff, not a successful click or a generic transport error.
       // Keep the browser and original attempt alive; the caller can ask its

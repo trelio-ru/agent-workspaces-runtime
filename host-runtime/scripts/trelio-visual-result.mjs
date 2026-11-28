@@ -31,6 +31,7 @@ const reasons = new Set(['none', 'manual_control_active', 'stale_frame', 'naviga
 for (const reason of ['upload_file_invalid', 'upload_file_changed', 'upload_too_large', 'upload_limit_reached', 'upload_control_required', 'upload_timed_out']) reasons.add(reason);
 const exact = (value, keys) => value && typeof value === 'object' && !Array.isArray(value) && Object.keys(value).every(key => keys.includes(key));
 for (const reason of ['authentication_required', 'authentication_setup_required', 'authentication_unknown', 'authentication_cancelled', 'authentication_timeout', 'authentication_setup_failed', 'authentication_mail_busy']) reasons.add(reason);
+reasons.add('protected_submit_dispatched');
 const fail = () => { const error = new Error('VISUAL_RESULT_INVALID'); error.code = 'VISUAL_RESULT_INVALID'; throw error; };
 
 /** Audio refusal evidence is deliberately content-free. A closed stage and
@@ -204,6 +205,8 @@ function validatePng(bytes, discardBrowserColorProfile = false) {
 
 function validateResult(value, discardBrowserColorProfile) {
   if (!exact(value, ['kind', 'state', 'reason', 'sessionId', 'frameId', 'width', 'height', 'scroll', 'image', 'hasStoredSession', 'httpStatus', 'origin', 'diagnostic', 'audioDiagnostic', 'documentDiagnostic', 'attachmentDiagnostic']) || value.kind !== VISUAL_RESULT_KIND || !states.has(value.state) || !reasons.has(value.reason)) fail();
+  if (value.reason === 'protected_submit_dispatched' && (value.state !== 'manual_input_required'
+    || !uuid.test(value.sessionId) || Object.keys(value).sort().join(',') !== 'kind,reason,sessionId,state')) fail();
   if (value.attachmentDiagnostic !== undefined) {
     if (value.state !== 'error' || value.reason !== 'navigation_blocked') fail();
     validateVisualAttachmentDiagnostic(value.attachmentDiagnostic);

@@ -108,10 +108,11 @@ async function dialogWorker({ image = false, policyFailure, manual = false, prof
         async get(id) { return { id, url: currentUrl, status: 'complete' }; },
         async update(_id, input) { assert.equal(policy.length, 1, 'notification policy precedes provider navigation'); tabUpdates.push(JSON.parse(JSON.stringify(input))); if(input.url)navigation.push(input.url);currentUrl = input.url || currentUrl; return { id: 1, url: currentUrl, status: 'complete' }; },
         async sendMessage(_id, message, target) {
-          if (message.kind === 'authentication-guard') { await credentialCheck?.(); return { blocked: false }; }
+          if (message.kind === 'authentication-guard') return { blocked: (await credentialCheck?.()) === true };
           if (message.kind === 'arm_link_click') await armLink?.();
           if (authenticationMessage && message.kind.startsWith('authentication-')) return authenticationMessage(message, target);
-          if (message.kind === 'read_rendered_text') await textObservation?.(message);
+          if (message.kind === 'read_rendered_text' && (await textObservation?.(message)) === true)
+            return { error: 'manual_control_active' };
           return { title: 'Site', text: 'Original site result', controls: [], nextOffset: null, scanLimited: false };
         },
       },
@@ -236,9 +237,12 @@ test('only a signed same-origin child picker on the exact top editor can receive
   }
 });
 
-for (const mode of ['confirmed', 'changed-button', 'same-document-navigation', 'release-only']) {
+for (const mode of ['confirmed', 'next-password-form', 'changed-button', 'same-document-navigation', 'release-only']) {
   test('managed field-only fill masks the page and admits one original submit click only when proven: ' + mode, async () => {
-    const worker = await dialogWorker({ assistantBrowserSecrets: true, secretHit: mode !== 'changed-button' });
+    let worker;
+    const protectedNextForm = () => mode === 'next-password-form' && worker?.counts().clicks === 1;
+    worker = await dialogWorker({ assistantBrowserSecrets: true, secretHit: mode !== 'changed-button',
+      credentialCheck: protectedNextForm, textObservation: protectedNextForm });
     const original = await worker.dispatch('read-text');
     const handle = randomUUID(), targetUrl = 'https://example.test/';
     assert.equal((await worker.dispatch('secret-browser-bind', { handle, targetUrl, expiry: Date.now() + 9000 })).state, 'bound');
@@ -255,14 +259,19 @@ for (const mode of ['confirmed', 'changed-button', 'same-document-navigation', '
     if (mode === 'same-document-navigation') worker.frameEvent('Page.navigatedWithinDocument', { frameId: 'main' });
     const input = { frameId: original.frameId, x: 20, y: 20 };
     const click = await worker.dispatch('click', input);
-    assert.equal(click.state, mode === 'confirmed' ? 'ready' : 'error');
+    assert.equal(click.state, mode === 'confirmed' ? 'ready' : mode === 'next-password-form' ? 'manual_input_required' : 'error');
+    if (mode === 'next-password-form') {
+      assert.deepEqual(click, { state: 'manual_input_required', reason: 'protected_submit_dispatched' });
+      assert.equal((await worker.dispatch('read-text')).reason, 'manual_control_active');
+      assert.equal((await worker.dispatch('screenshot')).reason, 'manual_control_active');
+    }
     if (mode === 'confirmed') {
       assert.equal(click.text, 'Original site result');
       worker.restoreDocument('restored-document');
       assert.equal((await worker.dispatch('read-text')).reason, 'manual_control_active', 'back/forward restore cannot expose a credential');
     }
     assert.equal((await worker.dispatch('click', input)).reason, 'stale_frame');
-    assert.equal(worker.counts().clicks, mode === 'confirmed' ? 1 : 0);
+    assert.equal(worker.counts().clicks, ['confirmed', 'next-password-form'].includes(mode) ? 1 : 0);
     assert.equal(worker.sent.some(item => JSON.stringify(item).includes('fixture-value')), false);
   });
 }

@@ -2160,6 +2160,8 @@ Exact legacy template bytes для распознавания при мигра�
   method. Mask both text/images and dialogs before the setter, including
   lost outcomes and same-document navigation. A successful field-only fill
   may use one explicit click from the old frame on a bound native button.
+  Acknowledged submit and a protected next observation are distinct. A closed
+  dispatch receipt retains the mask and spent input, with no sign-in verdict.
   Real pre-consume refusals keep a closed reason through the signed request
   worker. Test real Chromium HTTPS and keep provider sign-in verification
   independent. Running Workspace finish presents its existing poll instruction

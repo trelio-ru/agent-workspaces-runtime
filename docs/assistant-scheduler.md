@@ -4518,7 +4518,11 @@ native button. The worker checks the original tab, document and button again
 and spends this continuation before input. It returns the next independently
 guarded observation when the browser navigates. A successful fill or click
 still needs an independent authentication read-back. Password/OTP screens
-continue to use their separate observation guard.
+continue to use their separate observation guard. When that guard refuses
+after the browser has acknowledged the one native click, the reply reports
+`protected_submit_dispatched` with no pixels or page content. This records
+only the input dispatch. It does not report sign-in success or authorize
+another click. An independent read may observe a later non-sensitive page.
 
 Genuine pre-consume adapter refusals retain a closed reason through the
 assistant Workspace process and facade. This receipt only classifies that

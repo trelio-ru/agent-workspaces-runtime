@@ -1355,7 +1355,17 @@ export function visualExtensionWorker(config, cookieState, createPacing, createT
       assertInputCurrent(original);
       await command(tab.id, 'Input.dispatchMouseEvent', { type: 'mouseReleased', x, y, button: 'left', buttons: 0, clickCount: 1 });
       await pause(500);
-      return captureDefault(navigationStage);
+      try {
+        const observation = await captureDefault(navigationStage);
+        if (observation.state !== 'manual_input_required' || observation.reason !== 'manual_control_active') return observation;
+      } catch (error) {
+        if (error.message !== 'manual_control_active') throw error;
+      }
+      // The native release was acknowledged before the observation stopped.
+      // Report dispatch separately from the provider's unverified result.
+      // The original frame remains spent and neither pixels nor text escape
+      // the same credential guard, including if the site stays on that page.
+      return { state: 'manual_input_required', reason: 'protected_submit_dispatched' };
     }
     if (['read-text', 'submit', 'request-ready'].includes(op) && config.observationMode !== 'text') throw Error('invalid_input');
     if (op === 'read-text') return captureText(args, navigationStage);

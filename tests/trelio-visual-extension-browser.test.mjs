@@ -39,7 +39,7 @@ test('native managed Secret binds the observed HTTPS document after a redirect a
           request.on('data', part => { body += part; });
           request.on('end', () => {
             received.push(new URLSearchParams(body).get('account') === value);
-            response.end('<!doctype html><title>Fixture</title><p>VERIFIED ORIGINAL SUBMISSION</p>');
+            response.end('<!doctype html><title>Fixture</title><p>PRIVATE PASSWORD SCREEN</p><input type="password" aria-label="Password">');
           });
           return;
         }
@@ -158,12 +158,17 @@ test('native managed Secret binds the observed HTTPS document after a redirect a
       const [{ x, y }] = view.controls.filter(control => control.role === 'button' && control.label === 'Continue');
       const input = { frameId: view.frameId, x, y };
       const clicked = await browser.call('click', input);
-      assert.equal(clicked.state, 'ready', clicked.reason);
-      assert.match(clicked.text, /VERIFIED ORIGINAL SUBMISSION/u);
+      assert.deepEqual(clicked, { kind: 'trelio.visual-browser/v1', state: 'manual_input_required',
+        reason: 'protected_submit_dispatched', sessionId: view.sessionId });
+      // Receiving the submit receipt does not permit either observation mode
+      // to read the new credential page or latch browser manual mode.
+      assert.equal((await browser.call('screenshot')).reason, 'manual_control_active');
+      assert.equal((await browser.call('read-text')).reason, 'manual_control_active');
       assert.deepEqual(await request(locator).then(response => response.json()),
         { state: 'refused', reasonCode: 'target_url_changed' });
       assert.equal((await browser.call('click', input)).reason, 'stale_frame');
       assert.deepEqual(received, [true]);
+      assert.equal((await browser.call('navigate', { url: entryUrl })).state, 'ready');
     } finally {
       await controlListener?.stop(); await redirectListener?.stop(); await listener?.stop(); await browser?.close().catch(() => browser.abort());
       await fs.rm(directory, { recursive: true, force: true, maxRetries: 10, retryDelay: 200 });
